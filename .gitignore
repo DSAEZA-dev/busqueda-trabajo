@@ -1,0 +1,21 @@
+# Entornos virtuales
+.venv/
+venv/
+env/
+__pycache__/
+*.pyc
+
+# Base de datos
+database/history.db
+*.sqlite3
+*.db
+
+# Archivos temporales o de sistema
+.DS_Store
+Thumbs.db
+
+# Scrapes locales / testing manual
+*.html
+*.txt
+!requirements.txt
+!README.md
