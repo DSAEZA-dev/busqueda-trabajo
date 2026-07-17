@@ -1,7 +1,26 @@
 import requests
 import json
+import base64
+import os
+import tempfile
 import time
+from pdflatex import PDFLaTeX
 from config.settings import OLLAMA_URL, MODEL_OLLAMA
+
+def compilar_latex_pdf(latex_code):
+    try:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tex_path = os.path.join(tmpdir, "cv.tex")
+            with open(tex_path, "w", encoding="utf-8") as f:
+                f.write(latex_code)
+            pdfl = PDFLaTeX.from_texfile(tex_path)
+            pdf, log, completed_process = pdfl.create_pdf(keep_pdf_file=True, keep_log_file=False)
+            return pdf
+    except Exception as e:
+        print(f"Error compilando PDF: {e}")
+        return None
+
+MODEL_VISION = "llava"
 
 def _call_ollama(prompt, fallback_data):
     payload = {
@@ -11,7 +30,7 @@ def _call_ollama(prompt, fallback_data):
         "stream": False
     }
     try:
-        response = requests.post(OLLAMA_URL, json=payload, timeout=60)
+        response = requests.post(OLLAMA_URL, json=payload, timeout=300)
         response.raise_for_status()
         data = response.json()
         result = json.loads(data["response"])
@@ -23,6 +42,62 @@ def _call_ollama(prompt, fallback_data):
         fallback_data["is_simulated"] = True
         fallback_data["model_used"] = "Simulación (Fallback)"
         return fallback_data
+
+def _call_ollama_vision(prompt, image_bytes, fallback_data):
+    """Llama a Ollama con un modelo de visión (llava) para procesar imágenes."""
+    image_b64 = base64.b64encode(image_bytes).decode('utf-8')
+    payload = {
+        "model": MODEL_VISION,
+        "prompt": prompt,
+        "images": [image_b64],
+        "format": "json",
+        "stream": False
+    }
+    try:
+        response = requests.post(OLLAMA_URL, json=payload, timeout=300)
+        response.raise_for_status()
+        data = response.json()
+        result = json.loads(data["response"])
+        result["is_simulated"] = False
+        result["model_used"] = MODEL_VISION
+        return result
+    except Exception:
+        time.sleep(0.5)
+        fallback_data["is_simulated"] = True
+        fallback_data["model_used"] = "Simulación (Fallback)"
+        return fallback_data
+
+def mejorar_campo_con_ia(texto_campo, tipo_campo):
+    """Mejora un campo individual del CV con IA."""
+    instrucciones = {
+        "resumen": "Reescribe este resumen profesional para que sea más impactante, conciso y orientado a logros. Usa verbos de acción y lenguaje ejecutivo.",
+        "logros": "Reescribe estos logros laborales para que suenen más profesionales e impactantes. Usa verbos de acción fuertes, cuantifica resultados cuando sea posible y destaca el valor aportado.",
+        "aprendizajes": "Reescribe estas competencias y aprendizajes adquiridos de forma profesional, enfatizando las habilidades técnicas y blandas ganadas y su aplicabilidad.",
+        "habilidades": "Reorganiza y mejora esta lista de habilidades para que sea más clara y profesional. Agrupa por categorías si es posible (técnicas, blandas, herramientas). Devuelve como texto separado por comas."
+    }
+    
+    instruccion = instrucciones.get(tipo_campo, "Mejora este texto para que sea más profesional e impactante.")
+    
+    prompt = f"""
+    {instruccion}
+    
+    Reglas:
+    - Mantén la VERDAD de los datos: NO inventes información que no esté presente.
+    - Corrige errores ortográficos y de redacción.
+    - El resultado debe estar en español.
+    
+    TEXTO ORIGINAL:
+    {texto_campo}
+    
+    Devuelve estrictamente un JSON con una sola llave "texto_mejorado":
+    {{
+        "texto_mejorado": "Tu texto mejorado aquí..."
+    }}
+    """
+    
+    fallback = {"texto_mejorado": texto_campo}
+    resultado = _call_ollama(prompt, fallback)
+    return resultado.get("texto_mejorado", texto_campo)
 
 def evaluar_con_ollama(cv_text, job_desc, direccion_usuario, ubicacion_oferta, dias_antiguedad=0):
     prompt = f"""
@@ -137,6 +212,32 @@ def generar_cv_latex(cv_text, profesion_objetivo):
     resultado = _call_ollama(prompt, fallback)
     return resultado.get("latex_code", fallback_latex)
 
+def generar_cv_latex_para_oferta(cv_text, descripcion_oferta, profesion_objetivo):
+    prompt = f"""
+    Eres un experto en currículums ATS-friendly. Convierte el siguiente texto de un CV en código LaTeX puro (estilo Jake's Resume), 
+    optimizado específicamente para postular a esta oferta de empleo. 
+    
+    Ajusta el resumen, destaca los logros más relevantes para esta oferta y reescribe los puntos de experiencia y habilidades para 
+    hacer el mayor "match" posible con la descripción de la oferta, SIN INVENTAR experiencia que no esté en el CV original.
+    
+    OFERTA DE EMPLEO ({profesion_objetivo}):
+    {descripcion_oferta}
+    
+    CV ORIGINAL:
+    {cv_text}
+    
+    Devuelve estrictamente un JSON con una sola llave "latex_code" que contenga TODO el código LaTeX en formato string:
+    {{
+        "latex_code": "\\\\documentclass{{article}}..."
+    }}
+    """
+    
+    fallback_latex = "% Simulación de CV en LaTeX (Para Oferta)\n\\documentclass[letterpaper,11pt]{article}\n\\begin{document}\n\\textbf{CV Optimizado para Oferta (Demo)}\n\\end{document}"
+    
+    fallback = {"latex_code": fallback_latex}
+    resultado = _call_ollama(prompt, fallback)
+    return resultado.get("latex_code", fallback_latex)
+
 def mejorar_redaccion_cv(cv_text):
     prompt = f"""
     Eres un experto en empleabilidad y redacción de currículums ATS-friendly.
@@ -169,39 +270,77 @@ def parsear_cv_a_json(cv_text):
     Eres un parser experto de currículums. Toma el siguiente texto bruto de un CV y conviértelo en un JSON estructurado.
     
     Reglas IMPORTANTES:
-    - Extrae la información con máxima precisión. No omitas partes. El "resumen" debe ser TODO el párrafo o párrafos de introducción del candidato.
+    - Extrae la información con máxima precisión. No omitas partes.
+    - "nombre" es el nombre completo de la persona (Ej: "Juan Pérez González"). NO confundir con el título profesional.
+    - "titulo" es el título o rol profesional (Ej: "Ingeniero Civil Industrial", "Analista de Datos").
+    - El "resumen" debe ser TODO el párrafo o párrafos de introducción/perfil del candidato.
     - Si no encuentras información para un campo, devuelve una cadena vacía "". NUNCA devuelvas `null`.
     - En la sección "logros", debes unir todas las viñetas y descripciones de ese cargo en un solo bloque de texto. NO devuelvas una lista.
-    - Para las habilidades, únelas en una sola cadena separada por comas (ej: "Python, Excel, Liderazgo"). NO devuelvas una lista/array.
+    - En la sección "aprendizajes", extrae las competencias, tecnologías o habilidades que el candidato adquirió o desarrolló en ese cargo. Si no se mencionan explícitamente, infiere las más probables de la descripción. NO devuelvas una lista.
+    - Para los cursos, incluye el campo "fechas" con el período de estudio (Ej: "2020 - 2024"). Si no se menciona, devuelve una cadena vacía.
+    - Para las habilidades técnicas, únelas en una sola cadena separada por comas (ej: "Python, Excel, SQL"). NO devuelvas una lista/array.
+    - Para las habilidades blandas, únelas en una sola cadena separada por comas (ej: "Liderazgo, Trabajo en equipo, Comunicación efectiva"). NO devuelvas una lista/array. Si no se mencionan explícitamente, infiere las más probables del contexto del CV.
     
     TEXTO BRUTO DEL CV:
     {cv_text}
     
     Devuelve estrictamente un JSON con esta estructura exacta (SIN MARKDOWN ADICIONAL):
     {{
-        "titular": "...",
+        "nombre": "...",
+        "titulo": "...",
         "resumen": "...",
         "experiencias": [
-            {{"cargo": "...", "empresa": "...", "fechas": "...", "logros": "..."}}
+            {{"cargo": "...", "empresa": "...", "fechas": "...", "logros": "...", "aprendizajes": "..."}}
         ],
         "cursos": [
-            {{"nombre": "...", "institucion": "..."}}
+            {{"nombre": "...", "institucion": "...", "fechas": "..."}}
         ],
-        "habilidades": "..."
+        "habilidades": "...",
+        "habilidades_blandas": "..."
     }}
     """
     
     fallback = {
-        "titular": "",
+        "nombre": "",
+        "titulo": "",
         "resumen": "",
         "experiencias": [],
         "cursos": [],
-        "habilidades": ""
+        "habilidades": "",
+        "habilidades_blandas": ""
     }
     
-    import json
     try:
         resultado = _call_ollama(prompt, fallback)
         return resultado
     except Exception:
         return fallback
+
+def generar_cv_desde_imagen(image_bytes, cv_text):
+    """Genera código LaTeX basado en una imagen de referencia de diseño de CV y los datos del usuario."""
+    prompt = f"""
+    Eres un experto en diseño de currículums y LaTeX.
+    
+    Analiza la imagen adjunta que es un prototipo/diseño de referencia de un currículum.
+    Tu tarea es generar código LaTeX COMPLETO que replique lo más fielmente posible el DISEÑO VISUAL de la imagen (disposición, columnas, secciones, tipografía, colores), pero utilizando los DATOS REALES del candidato que se proporcionan abajo.
+    
+    DATOS REALES DEL CANDIDATO (usar estos, NO los de la imagen):
+    {cv_text}
+    
+    Reglas:
+    - El código LaTeX debe compilar correctamente sin errores.
+    - Replica el diseño visual de la imagen: layout, columnas, orden de secciones, uso de íconos si los hay.
+    - Escapa caracteres especiales de LaTeX correctamente.
+    - Usa paquetes estándar (geometry, fontawesome5, xcolor, tikz, tabularx, etc.).
+    
+    Devuelve estrictamente un JSON con una sola llave "latex_code":
+    {{
+        "latex_code": "\\\\documentclass{{article}}..."
+    }}
+    """
+    
+    fallback_latex = "% Error: No se pudo procesar la imagen\n\\documentclass[letterpaper,11pt]{article}\n\\begin{document}\n\\textbf{Error al generar CV desde imagen}\n\\end{document}"
+    fallback = {"latex_code": fallback_latex}
+    
+    resultado = _call_ollama_vision(prompt, image_bytes, fallback)
+    return resultado.get("latex_code", fallback_latex)

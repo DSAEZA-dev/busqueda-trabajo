@@ -31,22 +31,30 @@ def init_db():
             comuna_casa TEXT,
             cv_text TEXT,
             profesion_detectada TEXT,
-            datos_perfil TEXT
+            datos_perfil TEXT,
+            cv_estructurado TEXT
         )
     ''')
+    
+    # Migrar tabla existente si le falta la columna cv_estructurado
+    try:
+        cursor.execute("ALTER TABLE perfiles_usuario ADD COLUMN cv_estructurado TEXT")
+    except Exception:
+        pass  # Ya existe la columna
     
     conn.commit()
     conn.close()
 
-def save_user_profile(rut, region, comuna, cv_text, profesion, datos_perfil):
+def save_user_profile(rut, region, comuna, cv_text, profesion, datos_perfil, cv_estructurado=None):
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     datos_json = json.dumps(datos_perfil) if datos_perfil else "{}"
+    cv_est_json = json.dumps(cv_estructurado, ensure_ascii=False) if cv_estructurado else None
     cursor.execute('''
         INSERT OR REPLACE INTO perfiles_usuario (
-            rut, region_casa, comuna_casa, cv_text, profesion_detectada, datos_perfil
-        ) VALUES (?, ?, ?, ?, ?, ?)
-    ''', (rut, region, comuna, cv_text, profesion, datos_json))
+            rut, region_casa, comuna_casa, cv_text, profesion_detectada, datos_perfil, cv_estructurado
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+    ''', (rut, region, comuna, cv_text, profesion, datos_json, cv_est_json))
     conn.commit()
     conn.close()
 
@@ -58,13 +66,20 @@ def get_user_profile(rut):
     conn.close()
     
     if row:
+        cv_est = None
+        if len(row) > 6 and row[6]:
+            try:
+                cv_est = json.loads(row[6])
+            except Exception:
+                cv_est = None
         return {
             "rut": row[0],
             "region_casa": row[1],
             "comuna_casa": row[2],
             "cv_text": row[3],
             "profesion_detectada": row[4],
-            "datos_perfil": json.loads(row[5]) if row[5] else {}
+            "datos_perfil": json.loads(row[5]) if row[5] else {},
+            "cv_estructurado": cv_est
         }
     return None
 

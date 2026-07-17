@@ -1,5 +1,7 @@
 streamlit
 playwright
 sentence-transformers
+torchvision
 requests
 pandas
+pdflatex

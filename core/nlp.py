@@ -27,21 +27,31 @@ def expandir_cv_dinamico(cv_text, terminos_encontrados, glosario_dinamico=None):
     
     for tech in terminos_encontrados:
         capas = glosario_dinamico.get(tech, {})
-        # Extraer todas las palabras de las 3 capas
-        sinonimos = capas.get("sinonimos", [])
-        herramientas = capas.get("herramientas", [])
-        impacto = capas.get("impacto", [])
         
-        todas_expansiones = sinonimos + herramientas + impacto
-        
-        if todas_expansiones:
-            cv_expandido += " " + " ".join(todas_expansiones)
+        if isinstance(capas, dict):
+            # Extraer todas las palabras de las 3 capas
+            sinonimos = capas.get("sinonimos", [])
+            herramientas = capas.get("herramientas", [])
+            impacto = capas.get("impacto", [])
+            todas_expansiones = sinonimos + herramientas + impacto
+            
+            if todas_expansiones:
+                cv_expandido += " " + " ".join(todas_expansiones)
+                expansiones_dict[tech] = {
+                    "Sinónimos": sinonimos,
+                    "Herramientas": herramientas,
+                    "Impacto": impacto
+                }
+                total_terminos += len(todas_expansiones)
+        else:
+            # Si el modelo generó una cadena de texto en vez de diccionario
+            cv_expandido += f" {capas}"
             expansiones_dict[tech] = {
-                "Sinónimos": sinonimos,
-                "Herramientas": herramientas,
-                "Impacto": impacto
+                "Sinónimos": [str(capas)],
+                "Herramientas": [],
+                "Impacto": []
             }
-            total_terminos += len(todas_expansiones)
+            total_terminos += 1
         
     return cv_expandido, expansiones_dict, total_terminos
 

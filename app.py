@@ -10,7 +10,7 @@ from config.geography import REGIONES_CHILE
 from database.db_manager import init_db, save_oferta, get_history, get_user_profile, save_user_profile
 from core.nlp import get_semantic_model, extraer_habilidades_base, expandir_cv_dinamico, calcular_similitud
 from core.scraper import motor_multiscraping
-from core.llm_evaluator import evaluar_con_ollama, analizar_perfil, generar_cv_latex, mejorar_redaccion_cv, parsear_cv_a_json
+from core.llm_evaluator import evaluar_con_ollama, analizar_perfil, generar_cv_latex, mejorar_redaccion_cv, parsear_cv_a_json, mejorar_campo_con_ia, generar_cv_desde_imagen
 from ui.components import load_css, mostrar_tabla_ofertas, mostrar_historial
 
 # Crear directorios si no existen
@@ -29,10 +29,13 @@ if "perfil_analizado" not in st.session_state: st.session_state.perfil_analizado
 if "datos_perfil" not in st.session_state: st.session_state.datos_perfil = None
 if "current_rut" not in st.session_state: st.session_state.current_rut = ""
 if "cv_text" not in st.session_state: st.session_state.cv_text = ""
+if "cv_text_original" not in st.session_state: st.session_state.cv_text_original = ""
+if "cv_text_construido" not in st.session_state: st.session_state.cv_text_construido = ""
 if "region_casa" not in st.session_state: st.session_state.region_casa = "No especificar"
 if "comuna_casa" not in st.session_state: st.session_state.comuna_casa = "No especificar"
 if "num_experiencias" not in st.session_state: st.session_state.num_experiencias = 1
 if "num_cursos" not in st.session_state: st.session_state.num_cursos = 1
+if "cv_estructurado_cargado" not in st.session_state: st.session_state.cv_estructurado_cargado = False
 
 st.title("🤖 Agente Buscador de Empleo Inteligente")
 
@@ -51,9 +54,36 @@ with tab_buscar:
             st.session_state.region_casa = perfil.get("region_casa", "No especificar")
             st.session_state.comuna_casa = perfil.get("comuna_casa", "No especificar")
             st.session_state.cv_text = perfil.get("cv_text", "")
+            st.session_state.cv_text_original = st.session_state.cv_text
+            st.session_state.cv_text_construido = st.session_state.cv_text
             st.session_state.datos_perfil = perfil.get("datos_perfil", None)
             if st.session_state.datos_perfil:
                 st.session_state.perfil_analizado = True
+            # Cargar CV estructurado si existe
+            cv_est = perfil.get("cv_estructurado", None)
+            if cv_est and isinstance(cv_est, dict):
+                st.session_state.b_nombre = cv_est.get("nombre", "")
+                st.session_state.b_titulo = cv_est.get("titulo", "")
+                st.session_state.b_resumen = cv_est.get("resumen", "")
+                exps = cv_est.get("experiencias", [])
+                if exps:
+                    st.session_state.num_experiencias = len(exps)
+                    for i, exp in enumerate(exps):
+                        st.session_state[f"cargo_{i}"] = exp.get("cargo", "")
+                        st.session_state[f"empresa_{i}"] = exp.get("empresa", "")
+                        st.session_state[f"fechas_{i}"] = exp.get("fechas", "")
+                        st.session_state[f"logros_{i}"] = exp.get("logros", "")
+                        st.session_state[f"aprendizajes_{i}"] = exp.get("aprendizajes", "")
+                cursos = cv_est.get("cursos", [])
+                if cursos:
+                    st.session_state.num_cursos = len(cursos)
+                    for i, cur in enumerate(cursos):
+                        st.session_state[f"curso_nombre_{i}"] = cur.get("nombre", "")
+                        st.session_state[f"institucion_{i}"] = cur.get("institucion", "")
+                        st.session_state[f"curso_fechas_{i}"] = cur.get("fechas", "")
+                st.session_state.b_habilidades = cv_est.get("habilidades", "")
+                st.session_state.b_habilidades_blandas = cv_est.get("habilidades_blandas", "")
+                st.session_state.cv_estructurado_cargado = True
             st.rerun()
 
     col_id1, col_id2 = st.columns(2)
@@ -93,18 +123,19 @@ with tab_buscar:
         with tab_a:
             cv_file = st.file_uploader("Sube tu archivo de CV aquí (.txt o .md)", type=["txt", "md"])
             if cv_file:
-                st.session_state.cv_text = cv_file.getvalue().decode("utf-8")
+                st.session_state.cv_text_original = cv_file.getvalue().decode("utf-8")
+                st.session_state.cv_text = st.session_state.cv_text_original
                 
         with tab_b:
             st.info("Completa los campos y consolida. Luego puedes usar la IA para mejorar tu currículum.")
             
-            if st.session_state.cv_text:
+            if st.session_state.cv_text_original or st.session_state.cv_text:
                 if st.button("🤖 Autocompletar desde el CV subido", type="secondary"):
-                    with st.spinner("Parseando CV... esto tomará unos segundos."):
-                        import json
-                        datos_parsed = parsear_cv_a_json(st.session_state.cv_text)
+                    with st.spinner("Parseando CV con IA... esto tomará unos segundos."):
+                        datos_parsed = parsear_cv_a_json(st.session_state.cv_text_original or st.session_state.cv_text)
                         
-                        st.session_state.b_titular = str(datos_parsed.get("titular") or "")
+                        st.session_state.b_nombre = str(datos_parsed.get("nombre") or datos_parsed.get("titular") or "")
+                        st.session_state.b_titulo = str(datos_parsed.get("titulo") or "")
                         st.session_state.b_resumen = str(datos_parsed.get("resumen") or "")
                         
                         exps = datos_parsed.get("experiencias")
@@ -121,6 +152,10 @@ with tab_buscar:
                                 if isinstance(logros, list): logros = "\n".join(str(l) for l in logros)
                                 st.session_state[f"logros_{i}"] = str(logros or "")
                                 
+                                aprendizajes = exp.get("aprendizajes")
+                                if isinstance(aprendizajes, list): aprendizajes = "\n".join(str(a) for a in aprendizajes)
+                                st.session_state[f"aprendizajes_{i}"] = str(aprendizajes or "")
+                                
                         cursos = datos_parsed.get("cursos")
                         if not isinstance(cursos, list): cursos = []
                         if cursos:
@@ -129,15 +164,30 @@ with tab_buscar:
                                 if not isinstance(cur, dict): continue
                                 st.session_state[f"curso_nombre_{i}"] = str(cur.get("nombre") or "")
                                 st.session_state[f"institucion_{i}"] = str(cur.get("institucion") or "")
+                                st.session_state[f"curso_fechas_{i}"] = str(cur.get("fechas") or "")
                                 
                         habilidades = datos_parsed.get("habilidades")
                         if isinstance(habilidades, list): habilidades = ", ".join(str(h) for h in habilidades)
                         st.session_state.b_habilidades = str(habilidades or "")
+                        
+                        habilidades_blandas = datos_parsed.get("habilidades_blandas")
+                        if isinstance(habilidades_blandas, list): habilidades_blandas = ", ".join(str(h) for h in habilidades_blandas)
+                        st.session_state.b_habilidades_blandas = str(habilidades_blandas or "")
                     st.rerun()
             
-            titular = st.text_input("Titular Profesional (Ej: Ingeniero Industrial especializado en Datos)", key="b_titular")
-            resumen = st.text_area("Resumen Profesional", height=100, key="b_resumen")
+            # --- Datos Personales ---
+            nombre = st.text_input("Nombre Completo del Profesional", key="b_nombre", placeholder="Ej: Isidora Castillo Anabalón")
+            titulo = st.text_input("Título Profesional", key="b_titulo", placeholder="Ej: Ingeniero Civil Industrial especializado en Datos")
             
+            # --- Resumen Profesional con botón IA ---
+            resumen = st.text_area("Resumen Profesional", height=100, key="b_resumen")
+            if st.session_state.get("b_resumen"):
+                if st.button("✨ Mejorar Resumen con IA", key="ia_resumen"):
+                    with st.spinner("Mejorando resumen..."):
+                        st.session_state.b_resumen = mejorar_campo_con_ia(st.session_state.b_resumen, "resumen")
+                    st.rerun()
+            
+            # --- Experiencia Laboral ---
             st.markdown("#### Experiencia Laboral")
             for i in range(st.session_state.num_experiencias):
                 with st.expander(f"Experiencia {i+1}", expanded=True):
@@ -145,66 +195,215 @@ with tab_buscar:
                     st.text_input(f"Empresa", key=f"empresa_{i}")
                     st.text_input(f"Fechas (Ej: Mar 2022 - Actualidad)", key=f"fechas_{i}")
                     st.text_area(f"Descripción de Logros", key=f"logros_{i}")
+                    if st.session_state.get(f"logros_{i}"):
+                        if st.button("✨ Mejorar Logros con IA", key=f"ia_logros_{i}"):
+                            with st.spinner("Mejorando logros..."):
+                                st.session_state[f"logros_{i}"] = mejorar_campo_con_ia(st.session_state[f"logros_{i}"], "logros")
+                            st.rerun()
+                    st.text_area(f"Competencias y Aprendizajes Adquiridos", key=f"aprendizajes_{i}", 
+                                 help="¿Qué habilidades, tecnologías o competencias desarrollaste en este cargo?")
+                    if st.session_state.get(f"aprendizajes_{i}"):
+                        if st.button("✨ Mejorar Aprendizajes con IA", key=f"ia_aprendizajes_{i}"):
+                            with st.spinner("Mejorando aprendizajes..."):
+                                st.session_state[f"aprendizajes_{i}"] = mejorar_campo_con_ia(st.session_state[f"aprendizajes_{i}"], "aprendizajes")
+                            st.rerun()
                     
             if st.button("➕ Agregar Otra Experiencia"):
                 st.session_state.num_experiencias += 1
                 st.rerun()
                 
+            # --- Formación y Cursos ---
             st.markdown("#### Formación y Cursos")
             for i in range(st.session_state.num_cursos):
                 with st.expander(f"Curso / Certificación {i+1}", expanded=True):
                     st.text_input(f"Nombre del Curso/Título", key=f"curso_nombre_{i}")
                     st.text_input(f"Institución", key=f"institucion_{i}")
+                    st.text_input(f"Período (Ej: 2020 - 2024)", key=f"curso_fechas_{i}")
                     
             if st.button("➕ Agregar Otro Curso"):
                 st.session_state.num_cursos += 1
                 st.rerun()
                 
+            # --- Habilidades ---
             st.markdown("#### Habilidades Técnicas")
             habilidades = st.text_area("Lista tus herramientas separadas por coma (Ej: Excel, Python, Liderazgo)", key="b_habilidades")
+            if st.session_state.get("b_habilidades"):
+                if st.button("✨ Mejorar Habilidades Técnicas con IA", key="ia_habilidades"):
+                    with st.spinner("Mejorando habilidades..."):
+                        st.session_state.b_habilidades = mejorar_campo_con_ia(st.session_state.b_habilidades, "habilidades")
+                    st.rerun()
             
-            col_b1, col_b2 = st.columns(2)
+            # --- Habilidades Blandas ---
+            st.markdown("#### Habilidades Blandas")
+            habilidades_blandas = st.text_area("Lista tus habilidades blandas separadas por coma (Ej: Liderazgo, Trabajo en equipo, Comunicación)", key="b_habilidades_blandas")
+            if st.session_state.get("b_habilidades_blandas"):
+                if st.button("✨ Mejorar Habilidades Blandas con IA", key="ia_habilidades_blandas"):
+                    with st.spinner("Mejorando habilidades blandas..."):
+                        st.session_state.b_habilidades_blandas = mejorar_campo_con_ia(st.session_state.b_habilidades_blandas, "habilidades")
+                    st.rerun()
+            
+            # --- Función auxiliar para construir CV estructurado ---
+            def _construir_cv_estructurado():
+                """Construye un dict con todos los campos del formulario."""
+                experiencias = []
+                for i in range(st.session_state.num_experiencias):
+                    if st.session_state.get(f"cargo_{i}"):
+                        experiencias.append({
+                            "cargo": st.session_state.get(f"cargo_{i}", ""),
+                            "empresa": st.session_state.get(f"empresa_{i}", ""),
+                            "fechas": st.session_state.get(f"fechas_{i}", ""),
+                            "logros": st.session_state.get(f"logros_{i}", ""),
+                            "aprendizajes": st.session_state.get(f"aprendizajes_{i}", "")
+                        })
+                cursos = []
+                for i in range(st.session_state.num_cursos):
+                    if st.session_state.get(f"curso_nombre_{i}"):
+                        cursos.append({
+                            "nombre": st.session_state.get(f"curso_nombre_{i}", ""),
+                            "institucion": st.session_state.get(f"institucion_{i}", ""),
+                            "fechas": st.session_state.get(f"curso_fechas_{i}", "")
+                        })
+                return {
+                    "nombre": st.session_state.get("b_nombre", ""),
+                    "titulo": st.session_state.get("b_titulo", ""),
+                    "resumen": st.session_state.get("b_resumen", ""),
+                    "experiencias": experiencias,
+                    "cursos": cursos,
+                    "habilidades": st.session_state.get("b_habilidades", ""),
+                    "habilidades_blandas": st.session_state.get("b_habilidades_blandas", "")
+                }
+            
+            def _cv_estructurado_a_texto(cv_est):
+                """Convierte el CV estructurado a texto plano."""
+                nombre = cv_est.get("nombre", "")
+                titulo_prof = cv_est.get("titulo", "")
+                resumen_txt = cv_est.get("resumen", "")
+                habs = cv_est.get("habilidades", "")
+                
+                cv_build = f"NOMBRE: {nombre}\nTÍTULO PROFESIONAL: {titulo_prof}\nRESUMEN: {resumen_txt}\n\nEXPERIENCIA:\n"
+                for exp in cv_est.get("experiencias", []):
+                    cv_build += f"- {exp['cargo']} en {exp['empresa']} ({exp['fechas']})\n"
+                    cv_build += f"  Logros: {exp['logros']}\n"
+                    if exp.get('aprendizajes'):
+                        cv_build += f"  Aprendizajes: {exp['aprendizajes']}\n"
+                cv_build += "\nFORMACIÓN:\n"
+                for cur in cv_est.get("cursos", []):
+                    fechas_cur = f" ({cur['fechas']})" if cur.get('fechas') else ""
+                    cv_build += f"- {cur['nombre']}, {cur['institucion']}{fechas_cur}\n"
+                cv_build += f"\nHABILIDADES TÉCNICAS: {habs}\n"
+                habs_blandas = cv_est.get("habilidades_blandas", "")
+                if habs_blandas:
+                    cv_build += f"HABILIDADES BLANDAS: {habs_blandas}\n"
+                return cv_build
+            
+            st.divider()
+            
+            # --- Botones de acción ---
+            col_b1, col_b2, col_b3 = st.columns(3)
             with col_b1:
                 if st.button("💾 Consolidar mi CV", use_container_width=True):
-                    cv_build = f"TITULAR: {titular}\nRESUMEN: {resumen}\n\nEXPERIENCIA:\n"
-                    for i in range(st.session_state.num_experiencias):
-                        if st.session_state.get(f"cargo_{i}"):
-                            cv_build += f"- {st.session_state.get(f'cargo_{i}')} en {st.session_state.get(f'empresa_{i}')} ({st.session_state.get(f'fechas_{i}')})\n  Logros: {st.session_state.get(f'logros_{i}')}\n"
-                    cv_build += "\nFORMACIÓN:\n"
-                    for i in range(st.session_state.num_cursos):
-                        if st.session_state.get(f"curso_nombre_{i}"):
-                            cv_build += f"- {st.session_state.get(f'curso_nombre_{i}')}, {st.session_state.get(f'institucion_{i}')}\n"
-                    cv_build += f"\nHABILIDADES: {habilidades}\n"
-                    
-                    st.session_state.cv_text = cv_build
+                    cv_est = _construir_cv_estructurado()
+                    st.session_state.cv_text_construido = _cv_estructurado_a_texto(cv_est)
+                    st.session_state.cv_text = st.session_state.cv_text_construido
                     st.success("✅ CV Consolidado exitosamente. Ya puedes analizarlo.")
                     
             with col_b2:
-                if st.button("🪄 Mejorar redacción con IA", type="secondary", use_container_width=True):
-                    if st.session_state.cv_text:
+                if st.button("🪄 Mejorar TODO con IA", type="secondary", use_container_width=True):
+                    cv_base = st.session_state.cv_text_construido or st.session_state.cv_text
+                    if cv_base:
                         with st.spinner("La IA está reescribiendo tu currículum de forma impactante..."):
-                            st.session_state.cv_text = mejorar_redaccion_cv(st.session_state.cv_text)
+                            st.session_state.cv_text_construido = mejorar_redaccion_cv(cv_base)
+                            st.session_state.cv_text = st.session_state.cv_text_construido
                         st.success("✅ ¡Currículum mejorado con IA!")
                     else:
                         st.error("Primero debes 'Consolidar mi CV' o subir uno en la Opción A.")
             
+            with col_b3:
+                if rut_usuario:
+                    if st.button("💾 Guardar CV al Perfil", use_container_width=True, type="primary"):
+                        cv_est = _construir_cv_estructurado()
+                        st.session_state.cv_text_construido = _cv_estructurado_a_texto(cv_est)
+                        st.session_state.cv_text = st.session_state.cv_text_construido
+                        prof = st.session_state.get("b_titulo", "")
+                        save_user_profile(rut_usuario, region_casa, comuna_casa, st.session_state.cv_text, prof, st.session_state.datos_perfil, cv_estructurado=cv_est)
+                        st.success(f"✅ CV guardado y vinculado al RUT {rut_usuario}. Podrás recuperarlo al reiniciar.")
+            
+            # --- Exportación LaTeX desde Fase 2 ---
+            if st.session_state.cv_text or st.session_state.get("b_nombre"):
+                st.divider()
+                st.markdown("#### 📄 Exportar CV en LaTeX")
+                
+                col_latex1, col_latex2 = st.columns(2)
+                with col_latex1:
+                    if st.button("📄 Generar LaTeX (formato estándar)", use_container_width=True):
+                        cv_est = _construir_cv_estructurado()
+                        cv_para_latex = _cv_estructurado_a_texto(cv_est) if cv_est.get("nombre") else st.session_state.cv_text
+                        titulo_prof = cv_est.get("titulo", "Profesional")
+                        with st.spinner("Generando código LaTeX..."):
+                            latex_code = generar_cv_latex(cv_para_latex, titulo_prof)
+                            st.download_button(
+                                label="📥 Descargar archivo .tex",
+                                data=latex_code,
+                                file_name=f"CV_{cv_est.get('nombre', 'Profesional').replace(' ', '_')}.tex",
+                                mime="text/plain"
+                            )
+                
+                with col_latex2:
+                    st.markdown("**📸 Generar desde imagen de referencia**")
+                    imagen_ref = st.file_uploader("Sube una foto de un diseño de CV de referencia", type=["jpg", "jpeg", "png"], key="img_cv_ref")
+                    if imagen_ref:
+                        st.image(imagen_ref, caption="Diseño de referencia", width=300)
+                        if st.button("🎨 Generar LaTeX basado en este diseño", use_container_width=True):
+                            cv_est = _construir_cv_estructurado()
+                            cv_para_latex = _cv_estructurado_a_texto(cv_est) if cv_est.get("nombre") else st.session_state.cv_text
+                            with st.spinner("La IA de visión está analizando el diseño y generando LaTeX... esto puede tomar unos minutos."):
+                                latex_code = generar_cv_desde_imagen(imagen_ref.getvalue(), cv_para_latex)
+                                st.download_button(
+                                    label="📥 Descargar .tex (diseño personalizado)",
+                                    data=latex_code,
+                                    file_name=f"CV_Diseno_Personalizado_{cv_est.get('nombre', 'Profesional').replace(' ', '_')}.tex",
+                                    mime="text/plain"
+                                )
+            
             if st.session_state.cv_text:
-                with st.expander("👀 Ver texto del CV Actual"):
+                with st.expander("👀 Ver texto del CV Actual (Último activo)"):
                     st.text_area("Texto en Memoria:", st.session_state.cv_text, height=150, disabled=True)
         
-        if st.session_state.cv_text:
+        if st.session_state.cv_text_original or st.session_state.cv_text_construido or st.session_state.cv_text:
             st.divider()
+            
+            st.markdown("### Selecciona el CV para analizar")
+            opciones_cv = []
+            if st.session_state.cv_text_original:
+                opciones_cv.append("📄 CV Original (Subido/Precargado)")
+            if st.session_state.cv_text_construido:
+                opciones_cv.append("🛠️ CV Construido / Mejorado (Fase 2)")
+                
+            if not opciones_cv:
+                opciones_cv.append("📄 CV Actual")
+                
+            idx = 1 if len(opciones_cv) > 1 else 0
+            cv_seleccionado = st.radio("Elige la versión del CV que usará la IA para sugerir cargos:", opciones_cv, index=idx)
+            
+            if cv_seleccionado.startswith("📄 CV Original"):
+                cv_final_text = st.session_state.cv_text_original
+            elif cv_seleccionado.startswith("🛠️"):
+                cv_final_text = st.session_state.cv_text_construido
+            else:
+                cv_final_text = st.session_state.cv_text
+                
             btn_analizar = st.button("🧠 Analizar mi Perfil con IA (Ir a Fase 3)", type="primary", width='stretch')
             
             if btn_analizar:
                 with st.spinner("Leyendo tu CV y estructurando posibles cargos..."):
-                    st.session_state.datos_perfil = analizar_perfil(st.session_state.cv_text)
+                    st.session_state.cv_text = cv_final_text
+                    st.session_state.datos_perfil = analizar_perfil(cv_final_text)
                     st.session_state.perfil_analizado = True
                     st.session_state.ofertas_evaluadas = []
                     
                     # Guardar perfil en la base de datos
                     prof = st.session_state.datos_perfil.get("profesion", "")
-                    save_user_profile(rut_usuario, region_casa, comuna_casa, st.session_state.cv_text, prof, st.session_state.datos_perfil)
+                    save_user_profile(rut_usuario, region_casa, comuna_casa, cv_final_text, prof, st.session_state.datos_perfil)
                     st.rerun()
                     
         if st.session_state.perfil_analizado and st.session_state.datos_perfil:
@@ -254,9 +453,12 @@ with tab_buscar:
                         st.write("La IA ha detectado estas habilidades clave en tu CV y utilizará las siguientes capas de expansión para encontrar ofertas afines:")
                         for tech, capas in glosario.items():
                             st.markdown(f"**{tech}**")
-                            st.markdown(f"- *Sinónimos*: {', '.join(capas.get('sinonimos', []))}")
-                            st.markdown(f"- *Herramientas*: {', '.join(capas.get('herramientas', []))}")
-                            st.markdown(f"- *Impacto*: {', '.join(capas.get('impacto', []))}")
+                            if isinstance(capas, dict):
+                                st.markdown(f"- *Sinónimos*: {', '.join(capas.get('sinonimos', []))}")
+                                st.markdown(f"- *Herramientas*: {', '.join(capas.get('herramientas', []))}")
+                                st.markdown(f"- *Impacto*: {', '.join(capas.get('impacto', []))}")
+                            else:
+                                st.markdown(f"- {capas}")
                 
                 # Generador LaTeX
                 with st.expander("📄 ¿Quieres tu CV optimizado en LaTeX para superar filtros ATS?"):
@@ -290,11 +492,19 @@ with tab_buscar:
                 with col_loc1:
                     modalidad = st.selectbox("Modalidad", ["Indiferente", "Presencial", "Híbrido", "Remoto"])
                 with col_loc2:
-                    region_post = st.selectbox("Región", ["Cualquier Región"] + list(REGIONES_CHILE.keys())) if modalidad != "Remoto" else "Remoto"
+                    opciones_reg_post = ["Cualquier Región"] + list(REGIONES_CHILE.keys())
+                    idx_reg = 0
+                    if st.session_state.get("region_casa") in opciones_reg_post and st.session_state.region_casa != "No especificar":
+                        idx_reg = opciones_reg_post.index(st.session_state.region_casa)
+                    region_post = st.selectbox("Región", opciones_reg_post, index=idx_reg) if modalidad != "Remoto" else "Remoto"
                 with col_loc3:
                     comunas_post = []
                     if modalidad != "Remoto" and region_post != "Cualquier Región":
-                        comunas_post = st.multiselect("Comuna (Vacío = Toda la región)", REGIONES_CHILE[region_post])
+                        opciones_com = REGIONES_CHILE[region_post]
+                        def_com = []
+                        if st.session_state.get("comuna_casa") in opciones_com and st.session_state.get("region_casa") == region_post:
+                            def_com = [st.session_state.comuna_casa]
+                        comunas_post = st.multiselect("Comuna (Vacío = Toda la región)", opciones_com, default=def_com)
                 
                 lugar_postulacion = "Remoto"
                 if modalidad != "Remoto":
@@ -460,11 +670,12 @@ with tab_buscar:
                     evaluacion_placeholder.markdown(f"```text\n" + "\n".join(log_text_lines[-5:]) + f"\n✅ Auditoría completa. {candidatas}/{candidatas} completadas.\n```")
                     
                     st.session_state.ofertas_evaluadas.sort(key=lambda x: x.get("puntaje", 0), reverse=True)
+                    st.session_state.ofertas_evaluadas = [of for of in st.session_state.ofertas_evaluadas if of.get("puntaje", 0) >= 7.5]
 
-            # Resultados si existen en sesión
             if st.session_state.ofertas_evaluadas:
                 # Asegurar orden incluso si se interrumpió el proceso a la mitad
                 st.session_state.ofertas_evaluadas.sort(key=lambda x: x.get("puntaje", 0), reverse=True)
+                st.session_state.ofertas_evaluadas = [of for of in st.session_state.ofertas_evaluadas if of.get("puntaje", 0) >= 7.5]
                 
                 st.divider()
                 st.markdown("### Paso 7: El Tablero de Comando Final")
@@ -500,6 +711,45 @@ with tab_buscar:
                                 if st.button("💾 Guardar en BD", key=f"save_{idx}", use_container_width=True):
                                     save_oferta(rut_usuario, oferta)
                                     st.toast(f"Oferta guardada exitosamente para el RUT {rut_usuario}.")
+                                    
+                            st.divider()
+                            st.markdown("#### 🪄 Generar CV para esta oferta")
+                            if f"draft_{idx}" not in st.session_state:
+                                st.session_state[f"draft_{idx}"] = ""
+                                
+                            col_gen1, col_gen2 = st.columns(2)
+                            with col_gen1:
+                                if st.button("🤖 Generar Borrador LaTeX (IA)", key=f"btn_gen_{idx}"):
+                                    with st.spinner("Creando currículum optimizado..."):
+                                        from core.llm_evaluator import generar_cv_latex_para_oferta
+                                        latex_res = generar_cv_latex_para_oferta(st.session_state.cv_text, oferta.get("descripcion", ""), oferta.get("titulo", ""))
+                                        st.session_state[f"draft_{idx}"] = latex_res
+                                        st.rerun()
+                            with col_gen2:
+                                img_cv_ref = st.file_uploader("Sube imagen de diseño", type=["jpg", "png"], key=f"img_ref_{idx}")
+                                if img_cv_ref:
+                                    if st.button("🎨 Generar basado en diseño (Llava)", key=f"btn_llava_{idx}"):
+                                        with st.spinner("Llava analizando diseño..."):
+                                            from core.llm_evaluator import generar_cv_desde_imagen
+                                            latex_res = generar_cv_desde_imagen(img_cv_ref.getvalue(), st.session_state.cv_text)
+                                            st.session_state[f"draft_{idx}"] = latex_res
+                                            st.rerun()
+                                            
+                            if st.session_state[f"draft_{idx}"]:
+                                st.session_state[f"draft_{idx}"] = st.text_area("Editor LaTeX:", st.session_state[f"draft_{idx}"], height=200, key=f"text_draft_{idx}")
+                                
+                                col_pdf1, col_pdf2 = st.columns(2)
+                                with col_pdf1:
+                                    st.download_button("📥 Descargar .tex", st.session_state[f"draft_{idx}"], file_name=f"CV_{oferta.get('empresa', 'Oferta')}.tex", key=f"dl_tex_{idx}")
+                                with col_pdf2:
+                                    if st.button("📄 Exportar a PDF (Requiere MiKTeX)", key=f"btn_pdf_{idx}", type="primary"):
+                                        with st.spinner("Compilando PDF localmente..."):
+                                            from core.llm_evaluator import compilar_latex_pdf
+                                            pdf_bytes = compilar_latex_pdf(st.session_state[f"draft_{idx}"])
+                                            if pdf_bytes:
+                                                st.download_button("✅ Descargar PDF", pdf_bytes, file_name=f"CV_{oferta.get('empresa', 'Oferta')}.pdf", mime="application/pdf", key=f"dl_pdf_{idx}")
+                                            else:
+                                                st.error("Error al compilar. Revisa que el código LaTeX sea válido y que pdflatex esté instalado (MiKTeX).")
     else:
         st.info("👈 Por favor, ingresa tu RUT para comenzar.")
 

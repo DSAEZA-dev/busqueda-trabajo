@@ -21,7 +21,7 @@ Además, adaptar el currículum a cada oferta toma tiempo valioso. Este proyecto
 1. **Ahorro de Tiempo:** El bot realiza _multiscraping_ en portales (como Computrabajo, entre otros) extrayendo las ofertas y centralizándolas en una interfaz limpia.
 2. **Filtrado Real:** Descarta automáticamente las ofertas que no alcanzan un umbral mínimo de similitud con tu perfil, ahorrándote el leer ofertas irrelevantes.
 3. **Análisis de Brechas (Gap Analysis):** La IA evalúa la oferta y te dice exactamente qué habilidades tienes, cuáles te faltan y por qué eres (o no) un buen candidato.
-4. **Mejora del CV:** Cuenta con un módulo de evaluación por LLM capaz de analizar tu perfil actual, corregir la redacción y potenciar tus logros.
+4. **Mejora y Generación de CVs:** Cuenta con un módulo de evaluación por LLM capaz de analizar tu perfil, corregir la redacción y exportar tu CV a un archivo `.tex` o `.pdf` con formato profesional. También soporta generar código LaTeX a partir de imágenes de referencia.
 5. **Historial y Seguimiento:** Almacena tu historial de ofertas evaluadas para que lleves un control claro de a dónde deberías postular.
 
 ## 🛠️ Tecnologías Utilizadas
@@ -29,8 +29,9 @@ Además, adaptar el currículum a cada oferta toma tiempo valioso. Este proyecto
 - **Frontend / UI:** [Streamlit](https://streamlit.io/)
 - **Scraping:** [Playwright](https://playwright.dev/) (Asíncrono)
 - **Base de Datos:** SQLite
-- **Inteligencia Artificial Local:** [Ollama](https://ollama.ai/) (Modelo: `llama3.1`)
+- **Inteligencia Artificial Local:** [Ollama](https://ollama.ai/) (Modelos: `llama3.1`, `llava`)
 - **Procesamiento NLP:** `sentence-transformers`
+- **Generación PDF:** `pdflatex` (requiere un entorno TeX local como [MiKTeX](https://miktex.org/))
 - **Lenguaje Base:** Python 3.x
 
 ## 🚀 Cómo instalar y ejecutar (Windows)
@@ -40,13 +41,32 @@ El proyecto incluye un instalador automático que configurará todo por ti (desc
 1. Clona este repositorio en tu computadora.
 2. Haz doble clic en el archivo `install_and_run_everything.bat`.
 
-Este script se encargará de:
-- Instalar **Ollama** vía `winget`.
-- Descargar el modelo **Llama 3.1** (aprox. 4.7 GB).
+Este script de instalación completo se encargará de:
+- Instalar **Ollama** y **MiKTeX** (para exportar PDF local) vía `winget`.
+- Descargar los modelos **Llama 3.1** y **Llava** (para análisis multimodal de imágenes).
+- Crear un entorno virtual (`.venv`), instalar las dependencias de Python y los navegadores de `playwright`.
 - Iniciar el servidor de IA en segundo plano.
 - Levantar la aplicación web de Streamlit.
 
 *(Nota: En ejecuciones futuras, solo necesitas correr el archivo `run.bat` si ya instalaste todo previamente).*
+
+## 🐧 Cómo instalar y ejecutar (Ubuntu / Linux)
+
+El proceso en Ubuntu es igual de automático. Solo debes asegurarte de tener permisos de ejecución en los scripts.
+
+1. Clona este repositorio en tu computadora.
+2. Abre la terminal en la carpeta del proyecto y dale permisos al instalador:
+   ```bash
+   chmod +x install_and_run_everything.sh
+   ```
+3. Ejecútalo:
+   ```bash
+   ./install_and_run_everything.sh
+   ```
+
+Este script hará un proceso análogo al de Windows, instalando Ollama mediante `curl`, configurando `texlive` por APT para el soporte PDF, descargando los modelos, instalando Playwright y finalmente arrancando Streamlit.
+
+*(Nota: En ejecuciones futuras, solo necesitas correr el archivo `./run.sh`)*
 
 ## 📂 Estructura Principal del Proyecto
 
