@@ -3,19 +3,50 @@ import json
 import base64
 import os
 import tempfile
+import subprocess
 import time
-from pdflatex import PDFLaTeX
 from config.settings import OLLAMA_URL, MODEL_OLLAMA
 
 def compilar_latex_pdf(latex_code):
+    """Compila código LaTeX a PDF usando pdflatex del sistema (MiKTeX).
+    Ejecuta pdflatex dos veces para resolver referencias cruzadas.
+    Retorna los bytes del PDF o None si falla."""
     try:
         with tempfile.TemporaryDirectory() as tmpdir:
             tex_path = os.path.join(tmpdir, "cv.tex")
+            pdf_path = os.path.join(tmpdir, "cv.pdf")
+            
             with open(tex_path, "w", encoding="utf-8") as f:
                 f.write(latex_code)
-            pdfl = PDFLaTeX.from_texfile(tex_path)
-            pdf, log, completed_process = pdfl.create_pdf(keep_pdf_file=True, keep_log_file=False)
-            return pdf
+            
+            # Ejecutar pdflatex dos veces (para resolver referencias)
+            for i in range(2):
+                result = subprocess.run(
+                    ["pdflatex", "-interaction=nonstopmode", "-output-directory", tmpdir, tex_path],
+                    capture_output=True, text=True, timeout=60, cwd=tmpdir
+                )
+            
+            if os.path.exists(pdf_path):
+                with open(pdf_path, "rb") as f:
+                    return f.read()
+            else:
+                # Mostrar las últimas líneas del log para debug
+                log_path = os.path.join(tmpdir, "cv.log")
+                if os.path.exists(log_path):
+                    with open(log_path, "r", encoding="utf-8", errors="ignore") as f:
+                        log_content = f.read()
+                    # Extraer solo las líneas de error
+                    errores = [l for l in log_content.split("\n") if l.startswith("!") or "Error" in l]
+                    if errores:
+                        print(f"Errores LaTeX: {'; '.join(errores[:5])}")
+                print(f"pdflatex stderr: {result.stderr[-500:] if result.stderr else 'N/A'}")
+                return None
+    except subprocess.TimeoutExpired:
+        print("Error: pdflatex tardó más de 60 segundos.")
+        return None
+    except FileNotFoundError:
+        print("Error: pdflatex no está instalado. Instala MiKTeX desde https://miktex.org/")
+        return None
     except Exception as e:
         print(f"Error compilando PDF: {e}")
         return None

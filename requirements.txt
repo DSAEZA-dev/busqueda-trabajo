@@ -1,7 +1,11 @@
 streamlit
 playwright
+playwright-stealth
 sentence-transformers
 torchvision
 requests
+aiohttp
 pandas
 pdflatex
+pymupdf
+easyocr

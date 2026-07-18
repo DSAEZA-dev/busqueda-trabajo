@@ -10,8 +10,9 @@ from config.geography import REGIONES_CHILE
 from database.db_manager import init_db, save_oferta, get_history, get_user_profile, save_user_profile
 from core.nlp import get_semantic_model, extraer_habilidades_base, expandir_cv_dinamico, calcular_similitud
 from core.scraper import motor_multiscraping
-from core.llm_evaluator import evaluar_con_ollama, analizar_perfil, generar_cv_latex, mejorar_redaccion_cv, parsear_cv_a_json, mejorar_campo_con_ia, generar_cv_desde_imagen
+from core.llm_evaluator import evaluar_con_ollama, analizar_perfil, generar_cv_latex, mejorar_redaccion_cv, parsear_cv_a_json, mejorar_campo_con_ia, generar_cv_desde_imagen, compilar_latex_pdf
 from ui.components import load_css, mostrar_tabla_ofertas, mostrar_historial
+from core.pdf_extractor import extraer_texto_pdf
 
 # Crear directorios si no existen
 os.makedirs("database", exist_ok=True)
@@ -36,6 +37,12 @@ if "comuna_casa" not in st.session_state: st.session_state.comuna_casa = "No esp
 if "num_experiencias" not in st.session_state: st.session_state.num_experiencias = 1
 if "num_cursos" not in st.session_state: st.session_state.num_cursos = 1
 if "cv_estructurado_cargado" not in st.session_state: st.session_state.cv_estructurado_cargado = False
+if "_pending_ia_updates" not in st.session_state: st.session_state._pending_ia_updates = {}
+
+# Aplicar actualizaciones pendientes de IA ANTES de renderizar widgets
+for _key, _val in st.session_state._pending_ia_updates.items():
+    st.session_state[_key] = _val
+st.session_state._pending_ia_updates = {}
 
 st.title("🤖 Agente Buscador de Empleo Inteligente")
 
@@ -121,9 +128,18 @@ with tab_buscar:
         tab_a, tab_b = st.tabs(["📄 Opción A: Subir Archivo", "🛠️ Opción B: Constructor de CV (IA)"])
         
         with tab_a:
-            cv_file = st.file_uploader("Sube tu archivo de CV aquí (.txt o .md)", type=["txt", "md"])
+            cv_file = st.file_uploader("Sube tu archivo de CV aquí (.txt, .md o .pdf)", type=["txt", "md", "pdf"])
             if cv_file:
-                st.session_state.cv_text_original = cv_file.getvalue().decode("utf-8")
+                if cv_file.name.lower().endswith(".pdf"):
+                    with st.spinner("Extrayendo texto del PDF (usando OCR si es necesario)..."):
+                        try:
+                            texto_pdf = extraer_texto_pdf(cv_file.getvalue(), ocr_threshold=100)
+                            st.session_state.cv_text_original = texto_pdf
+                        except Exception as e:
+                            st.error(f"Error al procesar el PDF: {e}")
+                            st.session_state.cv_text_original = ""
+                else:
+                    st.session_state.cv_text_original = cv_file.getvalue().decode("utf-8")
                 st.session_state.cv_text = st.session_state.cv_text_original
                 
         with tab_b:
@@ -184,7 +200,7 @@ with tab_buscar:
             if st.session_state.get("b_resumen"):
                 if st.button("✨ Mejorar Resumen con IA", key="ia_resumen"):
                     with st.spinner("Mejorando resumen..."):
-                        st.session_state.b_resumen = mejorar_campo_con_ia(st.session_state.b_resumen, "resumen")
+                        st.session_state._pending_ia_updates["b_resumen"] = mejorar_campo_con_ia(st.session_state.b_resumen, "resumen")
                     st.rerun()
             
             # --- Experiencia Laboral ---
@@ -198,14 +214,14 @@ with tab_buscar:
                     if st.session_state.get(f"logros_{i}"):
                         if st.button("✨ Mejorar Logros con IA", key=f"ia_logros_{i}"):
                             with st.spinner("Mejorando logros..."):
-                                st.session_state[f"logros_{i}"] = mejorar_campo_con_ia(st.session_state[f"logros_{i}"], "logros")
+                                st.session_state._pending_ia_updates[f"logros_{i}"] = mejorar_campo_con_ia(st.session_state[f"logros_{i}"], "logros")
                             st.rerun()
                     st.text_area(f"Competencias y Aprendizajes Adquiridos", key=f"aprendizajes_{i}", 
                                  help="¿Qué habilidades, tecnologías o competencias desarrollaste en este cargo?")
                     if st.session_state.get(f"aprendizajes_{i}"):
                         if st.button("✨ Mejorar Aprendizajes con IA", key=f"ia_aprendizajes_{i}"):
                             with st.spinner("Mejorando aprendizajes..."):
-                                st.session_state[f"aprendizajes_{i}"] = mejorar_campo_con_ia(st.session_state[f"aprendizajes_{i}"], "aprendizajes")
+                                st.session_state._pending_ia_updates[f"aprendizajes_{i}"] = mejorar_campo_con_ia(st.session_state[f"aprendizajes_{i}"], "aprendizajes")
                             st.rerun()
                     
             if st.button("➕ Agregar Otra Experiencia"):
@@ -230,7 +246,7 @@ with tab_buscar:
             if st.session_state.get("b_habilidades"):
                 if st.button("✨ Mejorar Habilidades Técnicas con IA", key="ia_habilidades"):
                     with st.spinner("Mejorando habilidades..."):
-                        st.session_state.b_habilidades = mejorar_campo_con_ia(st.session_state.b_habilidades, "habilidades")
+                        st.session_state._pending_ia_updates["b_habilidades"] = mejorar_campo_con_ia(st.session_state.b_habilidades, "habilidades")
                     st.rerun()
             
             # --- Habilidades Blandas ---
@@ -239,7 +255,7 @@ with tab_buscar:
             if st.session_state.get("b_habilidades_blandas"):
                 if st.button("✨ Mejorar Habilidades Blandas con IA", key="ia_habilidades_blandas"):
                     with st.spinner("Mejorando habilidades blandas..."):
-                        st.session_state.b_habilidades_blandas = mejorar_campo_con_ia(st.session_state.b_habilidades_blandas, "habilidades")
+                        st.session_state._pending_ia_updates["b_habilidades_blandas"] = mejorar_campo_con_ia(st.session_state.b_habilidades_blandas, "habilidades")
                     st.rerun()
             
             # --- Función auxiliar para construir CV estructurado ---
@@ -328,42 +344,6 @@ with tab_buscar:
                         save_user_profile(rut_usuario, region_casa, comuna_casa, st.session_state.cv_text, prof, st.session_state.datos_perfil, cv_estructurado=cv_est)
                         st.success(f"✅ CV guardado y vinculado al RUT {rut_usuario}. Podrás recuperarlo al reiniciar.")
             
-            # --- Exportación LaTeX desde Fase 2 ---
-            if st.session_state.cv_text or st.session_state.get("b_nombre"):
-                st.divider()
-                st.markdown("#### 📄 Exportar CV en LaTeX")
-                
-                col_latex1, col_latex2 = st.columns(2)
-                with col_latex1:
-                    if st.button("📄 Generar LaTeX (formato estándar)", use_container_width=True):
-                        cv_est = _construir_cv_estructurado()
-                        cv_para_latex = _cv_estructurado_a_texto(cv_est) if cv_est.get("nombre") else st.session_state.cv_text
-                        titulo_prof = cv_est.get("titulo", "Profesional")
-                        with st.spinner("Generando código LaTeX..."):
-                            latex_code = generar_cv_latex(cv_para_latex, titulo_prof)
-                            st.download_button(
-                                label="📥 Descargar archivo .tex",
-                                data=latex_code,
-                                file_name=f"CV_{cv_est.get('nombre', 'Profesional').replace(' ', '_')}.tex",
-                                mime="text/plain"
-                            )
-                
-                with col_latex2:
-                    st.markdown("**📸 Generar desde imagen de referencia**")
-                    imagen_ref = st.file_uploader("Sube una foto de un diseño de CV de referencia", type=["jpg", "jpeg", "png"], key="img_cv_ref")
-                    if imagen_ref:
-                        st.image(imagen_ref, caption="Diseño de referencia", width=300)
-                        if st.button("🎨 Generar LaTeX basado en este diseño", use_container_width=True):
-                            cv_est = _construir_cv_estructurado()
-                            cv_para_latex = _cv_estructurado_a_texto(cv_est) if cv_est.get("nombre") else st.session_state.cv_text
-                            with st.spinner("La IA de visión está analizando el diseño y generando LaTeX... esto puede tomar unos minutos."):
-                                latex_code = generar_cv_desde_imagen(imagen_ref.getvalue(), cv_para_latex)
-                                st.download_button(
-                                    label="📥 Descargar .tex (diseño personalizado)",
-                                    data=latex_code,
-                                    file_name=f"CV_Diseno_Personalizado_{cv_est.get('nombre', 'Profesional').replace(' ', '_')}.tex",
-                                    mime="text/plain"
-                                )
             
             if st.session_state.cv_text:
                 with st.expander("👀 Ver texto del CV Actual (Último activo)"):
@@ -372,7 +352,7 @@ with tab_buscar:
         if st.session_state.cv_text_original or st.session_state.cv_text_construido or st.session_state.cv_text:
             st.divider()
             
-            st.markdown("### Selecciona el CV para analizar")
+            st.markdown("### Selecciona el CV para analizar y exportar")
             opciones_cv = []
             if st.session_state.cv_text_original:
                 opciones_cv.append("📄 CV Original (Subido/Precargado)")
@@ -383,7 +363,7 @@ with tab_buscar:
                 opciones_cv.append("📄 CV Actual")
                 
             idx = 1 if len(opciones_cv) > 1 else 0
-            cv_seleccionado = st.radio("Elige la versión del CV que usará la IA para sugerir cargos:", opciones_cv, index=idx)
+            cv_seleccionado = st.radio("Elige la versión del CV que usará la IA para sugerir cargos y exportar:", opciones_cv, index=idx)
             
             if cv_seleccionado.startswith("📄 CV Original"):
                 cv_final_text = st.session_state.cv_text_original
@@ -391,7 +371,90 @@ with tab_buscar:
                 cv_final_text = st.session_state.cv_text_construido
             else:
                 cv_final_text = st.session_state.cv_text
+            
+            # --- Exportación a PDF desde Fase 2 ---
+            if cv_final_text:
+                st.divider()
+                st.markdown("#### 📄 Exportar CV en PDF")
+                st.caption("Se generará el código LaTeX y se compilará automáticamente a PDF usando el CV seleccionado arriba.")
                 
+                col_latex1, col_latex2 = st.columns(2)
+                with col_latex1:
+                    if st.button("📄 Generar PDF (formato estándar)", use_container_width=True):
+                        cv_est = _construir_cv_estructurado()
+                        cv_para_latex = cv_final_text
+                        titulo_prof = cv_est.get("titulo", "Profesional")
+                        nombre_archivo = cv_est.get("nombre", "Profesional").replace(" ", "_")
+                        with st.spinner("Generando código LaTeX y compilando a PDF..."):
+                            latex_code = generar_cv_latex(cv_para_latex, titulo_prof)
+                            pdf_bytes = compilar_latex_pdf(latex_code)
+                            if pdf_bytes:
+                                col_dl1, col_dl2 = st.columns(2)
+                                with col_dl1:
+                                    st.download_button(
+                                        label="📥 Descargar PDF",
+                                        data=pdf_bytes,
+                                        file_name=f"CV_{nombre_archivo}.pdf",
+                                        mime="application/pdf",
+                                        use_container_width=True
+                                    )
+                                with col_dl2:
+                                    st.download_button(
+                                        label="📥 Descargar .tex (código fuente)",
+                                        data=latex_code,
+                                        file_name=f"CV_{nombre_archivo}.tex",
+                                        mime="text/plain",
+                                        use_container_width=True
+                                    )
+                            else:
+                                st.error("❌ Error al compilar PDF. Se descargará el archivo .tex para revisión manual.")
+                                st.download_button(
+                                    label="📥 Descargar .tex (para compilar manualmente)",
+                                    data=latex_code,
+                                    file_name=f"CV_{nombre_archivo}.tex",
+                                    mime="text/plain"
+                                )
+                
+                with col_latex2:
+                    st.markdown("**📸 Generar desde imagen de referencia**")
+                    imagen_ref = st.file_uploader("Sube una foto de un diseño de CV de referencia", type=["jpg", "jpeg", "png"], key="img_cv_ref")
+                    if imagen_ref:
+                        st.image(imagen_ref, caption="Diseño de referencia", width=300)
+                        if st.button("🎨 Generar PDF basado en este diseño", use_container_width=True):
+                            cv_para_latex = cv_final_text
+                            cv_est = _construir_cv_estructurado()
+                            nombre_archivo = cv_est.get("nombre", "Profesional").replace(" ", "_")
+                            with st.spinner("La IA de visión está analizando el diseño y generando PDF... esto puede tomar unos minutos."):
+                                latex_code = generar_cv_desde_imagen(imagen_ref.getvalue(), cv_para_latex)
+                                pdf_bytes = compilar_latex_pdf(latex_code)
+                                if pdf_bytes:
+                                    col_dl3, col_dl4 = st.columns(2)
+                                    with col_dl3:
+                                        st.download_button(
+                                            label="📥 Descargar PDF (diseño personalizado)",
+                                            data=pdf_bytes,
+                                            file_name=f"CV_Diseno_{nombre_archivo}.pdf",
+                                            mime="application/pdf",
+                                            use_container_width=True
+                                        )
+                                    with col_dl4:
+                                        st.download_button(
+                                            label="📥 Descargar .tex (código fuente)",
+                                            data=latex_code,
+                                            file_name=f"CV_Diseno_{nombre_archivo}.tex",
+                                            mime="text/plain",
+                                            use_container_width=True
+                                        )
+                                else:
+                                    st.error("❌ Error al compilar PDF. Se descargará el archivo .tex para revisión manual.")
+                                    st.download_button(
+                                        label="📥 Descargar .tex (para compilar manualmente)",
+                                        data=latex_code,
+                                        file_name=f"CV_Diseno_{nombre_archivo}.tex",
+                                        mime="text/plain"
+                                    )
+            
+            st.divider()
             btn_analizar = st.button("🧠 Analizar mi Perfil con IA (Ir a Fase 3)", type="primary", width='stretch')
             
             if btn_analizar:
