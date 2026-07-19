@@ -175,18 +175,26 @@ def evaluar_con_ollama(cv_text, job_desc, direccion_usuario, ubicacion_oferta, d
     evaluacion["cerca_de_casa"] = cerca
     return evaluacion
 
-def analizar_perfil(cv_text):
+def analizar_perfil(cv_text, cargos_descartados=None):
+    if cargos_descartados is None: cargos_descartados = []
+    
+    exclusion_text = ""
+    if cargos_descartados:
+        exclusion_text = f"\n    ESTRICTAMENTE PROHIBIDO SUGERIR ESTOS CARGOS (El usuario ya los descartó): {', '.join(cargos_descartados)}\n"
+        
     prompt = f"""
     Eres un analista de recursos humanos experto. Lee el siguiente CV y extrae:
     1. La profesión principal del candidato.
     2. La ubicación geográfica (región, ciudad o comuna) si se menciona en el CV. Si no se menciona, devuelve null.
     3. Una lista de 10 cargos afines a los que este candidato podría postular, junto con un porcentaje de afinidad para cada uno (de mayor a menor).
        IMPORTANTE: Si un cargo tiene un equivalente directo y común en inglés y español (por ejemplo: "Data Analyst" y "Analista de Datos"), debes AGRUPARLOS en un solo concepto separados por " / " (Ej: "Data Analyst / Analista de Datos"). No desperdicies 2 espacios de los 10 con el mismo cargo en distintos idiomas.
-    4. Un "glosario_tecnico" basado ESTRICTAMENTE en las habilidades reales del CV. 
+       Además, para cada cargo, incluye un campo "habilidad_faltante_clave" indicando 1 o 2 tecnologías, herramientas o conocimientos puntuales que el candidato debería aprender para mejorar su % de afinidad con el estándar del mercado.
+    4. Un cálculo de "seniority_por_dominio". Agrupa la experiencia del CV en distintas "áreas profesionales" detectadas (ej: "Desarrollo Backend", "Soporte TI", "Ventas") y calcula los años totales de experiencia y el nivel (Trainee, Junior, Mid-Level, Senior, Lead) específicamente para cada área.
+    5. Un "glosario_tecnico" basado ESTRICTAMENTE en las habilidades reales del CV. 
        - Extrae hasta 7 competencias clave.
        - Para cada competencia, genera 3 capas semánticas: "sinonimos", "herramientas" (o tecnologías/conceptos asociados REALES, inferibles del uso en el CV. NO inventes herramientas no relacionadas), e "impacto" (el valor aportado).
        - IMPORTANTE: Si el candidato menciona una herramienta con un fin específico (ej: "Python para análisis de datos"), NO la expandas con fines ajenos (ej: frameworks web como Django/FastAPI).
-
+{exclusion_text}
     REGLAS DE ORO: 
     - PROHIBIDO copiar el ejemplo de abajo. El ejemplo es de Gastronomía, el CV real es de otra profesión (Ingeniería, Salud, Administración, Informática, etc.).
     - Genera un resultado 100% fiel a la disciplina del CV provisto. No asumas que es del rubro informático si no lo dice explícitamente.
@@ -198,9 +206,13 @@ def analizar_perfil(cv_text):
     {{
         "profesion": "Chef Ejecutivo",
         "ubicacion": "Valparaíso",
+        "seniority_por_dominio": {{
+            "Alta Cocina": {{"años": 8, "nivel": "Senior"}},
+            "Administración Gastronómica": {{"años": 3, "nivel": "Mid-Level"}}
+        }},
         "cargos_sugeridos": [
-            {{"cargo": "Chef de Cuisine / Jefe de Cocina", "afinidad": 95}},
-            {{"cargo": "Sous Chef / Subchef", "afinidad": 85}}
+            {{"cargo": "Chef de Cuisine / Jefe de Cocina", "afinidad": 95, "habilidad_faltante_clave": "Certificación en seguridad alimentaria ISO 22000"}},
+            {{"cargo": "Sous Chef / Subchef", "afinidad": 85, "habilidad_faltante_clave": "Manejo de software de inventario (ej. ChefTec)"}}
         ],
         "glosario_tecnico": {{
             "Cocina Francesa": {{
@@ -215,6 +227,7 @@ def analizar_perfil(cv_text):
     fallback = {
         "profesion": "No detectada (IA no disponible)",
         "ubicacion": "No detectada",
+        "seniority_por_dominio": {},
         "cargos_sugeridos": [],
         "glosario_tecnico": {},
         "fallback_reason": "El servidor de IA local no respondió. El análisis no pudo completarse. Revisa que Ollama esté ejecutándose e inténtalo de nuevo."
@@ -226,7 +239,12 @@ def generar_cv_latex(cv_text, profesion_objetivo):
     prompt = f"""
     Eres un experto en currículums ATS-friendly. Convierte el siguiente texto de un CV en código LaTeX puro (estilo Jake's Resume), optimizado específicamente para postular a cargos de "{profesion_objetivo}".
     
-    El CV debe verse profesional. Escapa correctamente caracteres especiales de LaTeX si es necesario.
+    INSTRUCCIONES CLAVE DE OPTIMIZACIÓN (CLUSTERING):
+    - Debes reestructurar el CV original enfocándote EXCLUSIVAMENTE en hacer match con el perfil de "{profesion_objetivo}".
+    - Reordena las habilidades, poniendo primero las que sean más relevantes para este rol.
+    - Resalta y expande los logros que aporten directamente a este nicho.
+    - Minimiza (o resume brevemente) la experiencia pasada que no aporte valor a este dominio específico.
+    - El CV debe verse profesional. Escapa correctamente caracteres especiales de LaTeX si es necesario.
     
     CV ORIGINAL:
     {cv_text}

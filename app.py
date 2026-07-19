@@ -38,6 +38,7 @@ if "num_experiencias" not in st.session_state: st.session_state.num_experiencias
 if "num_cursos" not in st.session_state: st.session_state.num_cursos = 1
 if "cv_estructurado_cargado" not in st.session_state: st.session_state.cv_estructurado_cargado = False
 if "_pending_ia_updates" not in st.session_state: st.session_state._pending_ia_updates = {}
+if "cargos_descartados" not in st.session_state: st.session_state.cargos_descartados = []
 
 # Aplicar actualizaciones pendientes de IA ANTES de renderizar widgets
 for _key, _val in st.session_state._pending_ia_updates.items():
@@ -459,8 +460,9 @@ with tab_buscar:
             
             if btn_analizar:
                 with st.spinner("Leyendo tu CV y estructurando posibles cargos..."):
+                    st.session_state.cargos_descartados = []
                     st.session_state.cv_text = cv_final_text
-                    st.session_state.datos_perfil = analizar_perfil(cv_final_text)
+                    st.session_state.datos_perfil = analizar_perfil(cv_final_text, st.session_state.cargos_descartados)
                     st.session_state.perfil_analizado = True
                     st.session_state.ofertas_evaluadas = []
                     
@@ -488,6 +490,14 @@ with tab_buscar:
             
             if not is_simulated:
                 st.success(f"🎓 **Profesión Detectada:** {profesion} | 📍 **Ubicación extraída del CV:** {ubicacion_cv}")
+                
+            seniority = datos.get("seniority_por_dominio", {})
+            if seniority:
+                st.markdown("#### 🎯 Seniority por Dominio")
+                cols = st.columns(len(seniority) if len(seniority) > 0 else 1)
+                for i, (area, data) in enumerate(seniority.items()):
+                    with cols[i % len(cols)]:
+                        st.metric(area, f"{data.get('nivel', 'N/A')}", f"{data.get('años', 0)} años exp.")
             
             cargos = datos.get("cargos_sugeridos", [])
             if cargos:
@@ -497,18 +507,28 @@ with tab_buscar:
                     c["Afinidad (%)"] = float(afinidad_val)
                     c["Cargo"] = c.get("cargo", "Desconocido")
                 
-                df_cargos = pd.DataFrame(cargos)[["Cargo", "Afinidad (%)"]]
                 # Ordenar por afinidad
-                df_cargos = df_cargos.sort_values(by="Afinidad (%)", ascending=False)
+                cargos = sorted(cargos, key=lambda x: x.get("Afinidad (%)", 0), reverse=True)
                 
-                st.markdown("**Top 10 cargos afines a tu perfil:**")
-                st.dataframe(
-                    df_cargos.style
-                        .bar(subset=['Afinidad (%)'], color='#2ecc71', vmin=0, vmax=100)
-                        .format({"Afinidad (%)": "{:.0f}%"}),
-                    width='stretch', 
-                    hide_index=True
-                )
+                st.markdown("#### 🏆 Top 10 cargos afines a tu perfil")
+                st.info("💡 Si un cargo no te interesa, descártalo (❌) y la IA recalibrará la lista omitiendo ese rol.")
+                
+                for c in cargos:
+                    cargo_nombre = c.get("Cargo", "Desconocido")
+                    afinidad = c.get("Afinidad (%)", 0)
+                    upskilling = c.get("habilidad_faltante_clave", c.get("Habilidad_Faltante_Clave", "No se detectó brecha significativa"))
+                    
+                    with st.container(border=True):
+                        col_info, col_btn = st.columns([5, 1])
+                        with col_info:
+                            st.markdown(f"**{cargo_nombre}** | Afinidad: `{afinidad:.0f}%`")
+                            st.caption(f"🔧 **Upskilling Radar:** {upskilling}")
+                        with col_btn:
+                            if st.button("❌ Descartar", key=f"desc_{cargo_nombre}"):
+                                st.session_state.cargos_descartados.append(cargo_nombre)
+                                with st.spinner(f"Descartando '{cargo_nombre}' y recalibrando sugerencias..."):
+                                    st.session_state.datos_perfil = analizar_perfil(cv_final_text, st.session_state.cargos_descartados)
+                                st.rerun()
                 # Mostrar Glosario Dinámico si existe
                 glosario = datos.get("glosario_tecnico")
                 if glosario:
@@ -525,14 +545,17 @@ with tab_buscar:
                 
                 # Generador LaTeX
                 with st.expander("📄 ¿Quieres tu CV optimizado en LaTeX para superar filtros ATS?"):
-                    st.write("La IA reestructurará tu CV actual siguiendo el formato estándar de la industria (ATS-friendly).")
-                    if st.button("Generar Código LaTeX"):
-                        with st.spinner("Escribiendo código LaTeX..."):
-                            latex_code = generar_cv_latex(st.session_state.cv_text, profesion)
+                    st.write("La IA reestructurará tu CV actual enfocándose 100% en el cargo que selecciones, resaltando logros clave y minimizando ruido.")
+                    opciones_latex = [c.get("Cargo", "Desconocido") for c in cargos]
+                    cargo_latex = st.selectbox("Selecciona el cargo objetivo para el CV", opciones_latex)
+                    
+                    if st.button("Generar Código LaTeX Especializado"):
+                        with st.spinner(f"Escribiendo código LaTeX optimizado para {cargo_latex}..."):
+                            latex_code = generar_cv_latex(st.session_state.cv_text, cargo_latex)
                             st.download_button(
                                 label="📥 Descargar archivo .tex",
                                 data=latex_code,
-                                file_name=f"CV_Optimizado_{profesion.replace(' ', '_')}.tex",
+                                file_name=f"CV_Optimizado_{cargo_latex.replace(' ', '_')}.tex",
                                 mime="text/plain"
                             )
                 
