@@ -9,3 +9,5 @@ pandas
 pdflatex
 pymupdf
 easyocr
+chromadb
+

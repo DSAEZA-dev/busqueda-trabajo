@@ -8,9 +8,15 @@ import os
 from config.settings import SIMILARITY_THRESHOLD
 from config.geography import REGIONES_CHILE
 from database.db_manager import init_db, save_oferta, get_history, get_user_profile, save_user_profile
-from core.nlp import get_semantic_model, extraer_habilidades_base, expandir_cv_dinamico, calcular_similitud
+from core.nlp import get_semantic_model, extraer_habilidades_base, expandir_cv_dinamico, calcular_similitud, generar_embedding_query
 from core.scraper import motor_multiscraping
-from core.llm_evaluator import evaluar_con_ollama, analizar_perfil, generar_cv_latex, mejorar_redaccion_cv, parsear_cv_a_json, mejorar_campo_con_ia, generar_cv_desde_imagen, compilar_latex_pdf
+
+from core.llm_evaluator import evaluar_con_ollama, analizar_perfil, generar_cv_latex, mejorar_redaccion_cv, parsear_cv_a_json, mejorar_campo_con_ia, generar_cv_desde_imagen
+from core.cv_optimizer import optimizar_cv_base, adaptar_cv_a_oferta
+from core.pdf_compiler import compilar_latex_pdf, sanitizar_latex
+from core.postulacion_kit import generar_kit_postulacion
+
+
 from ui.components import load_css, mostrar_tabla_ofertas, mostrar_historial
 from core.pdf_extractor import extraer_texto_pdf
 
@@ -36,6 +42,7 @@ if "region_casa" not in st.session_state: st.session_state.region_casa = "No esp
 if "comuna_casa" not in st.session_state: st.session_state.comuna_casa = "No especificar"
 if "num_experiencias" not in st.session_state: st.session_state.num_experiencias = 1
 if "num_cursos" not in st.session_state: st.session_state.num_cursos = 1
+if "num_idiomas" not in st.session_state: st.session_state.num_idiomas = 0
 if "cv_estructurado_cargado" not in st.session_state: st.session_state.cv_estructurado_cargado = False
 if "_pending_ia_updates" not in st.session_state: st.session_state._pending_ia_updates = {}
 if "cargos_descartados" not in st.session_state: st.session_state.cargos_descartados = []
@@ -91,6 +98,12 @@ with tab_buscar:
                         st.session_state[f"curso_fechas_{i}"] = cur.get("fechas", "")
                 st.session_state.b_habilidades = cv_est.get("habilidades", "")
                 st.session_state.b_habilidades_blandas = cv_est.get("habilidades_blandas", "")
+                idiomas = cv_est.get("idiomas", [])
+                if idiomas:
+                    st.session_state.num_idiomas = len(idiomas)
+                    for i, idi in enumerate(idiomas):
+                        st.session_state[f"idioma_nombre_{i}"] = idi.get("idioma", "")
+                        st.session_state[f"idioma_nivel_{i}"] = idi.get("nivel", "Básico")
                 st.session_state.cv_estructurado_cargado = True
             st.rerun()
 
@@ -190,6 +203,15 @@ with tab_buscar:
                         habilidades_blandas = datos_parsed.get("habilidades_blandas")
                         if isinstance(habilidades_blandas, list): habilidades_blandas = ", ".join(str(h) for h in habilidades_blandas)
                         st.session_state.b_habilidades_blandas = str(habilidades_blandas or "")
+                        
+                        idiomas_parsed = datos_parsed.get("idiomas")
+                        if not isinstance(idiomas_parsed, list): idiomas_parsed = []
+                        if idiomas_parsed:
+                            st.session_state.num_idiomas = len(idiomas_parsed)
+                            for i, idi in enumerate(idiomas_parsed):
+                                if not isinstance(idi, dict): continue
+                                st.session_state[f"idioma_nombre_{i}"] = str(idi.get("idioma") or "")
+                                st.session_state[f"idioma_nivel_{i}"] = str(idi.get("nivel") or "Básico")
                     st.rerun()
             
             # --- Datos Personales ---
@@ -259,6 +281,23 @@ with tab_buscar:
                         st.session_state._pending_ia_updates["b_habilidades_blandas"] = mejorar_campo_con_ia(st.session_state.b_habilidades_blandas, "habilidades")
                     st.rerun()
             
+            # --- Idiomas ---
+            st.markdown("#### Idiomas")
+            for i in range(st.session_state.num_idiomas):
+                with st.expander(f"Idioma {i+1}", expanded=True):
+                    col_i1, col_i2 = st.columns([2, 1])
+                    with col_i1:
+                        st.text_input(f"Idioma", key=f"idioma_nombre_{i}", placeholder="Ej: Inglés")
+                    with col_i2:
+                        niveles = ["Básico", "Intermedio", "Avanzado", "Nativo"]
+                        current_nivel = st.session_state.get(f"idioma_nivel_{i}", "Básico")
+                        idx = niveles.index(current_nivel) if current_nivel in niveles else 0
+                        st.selectbox(f"Nivel", niveles, index=idx, key=f"idioma_nivel_{i}")
+                    
+            if st.button("➕ Agregar Idioma"):
+                st.session_state.num_idiomas += 1
+                st.rerun()
+            
             # --- Función auxiliar para construir CV estructurado ---
             def _construir_cv_estructurado():
                 """Construye un dict con todos los campos del formulario."""
@@ -280,6 +319,13 @@ with tab_buscar:
                             "institucion": st.session_state.get(f"institucion_{i}", ""),
                             "fechas": st.session_state.get(f"curso_fechas_{i}", "")
                         })
+                idiomas_list = []
+                for i in range(st.session_state.num_idiomas):
+                    if st.session_state.get(f"idioma_nombre_{i}"):
+                        idiomas_list.append({
+                            "idioma": st.session_state.get(f"idioma_nombre_{i}", ""),
+                            "nivel": st.session_state.get(f"idioma_nivel_{i}", "Básico")
+                        })
                 return {
                     "nombre": st.session_state.get("b_nombre", ""),
                     "titulo": st.session_state.get("b_titulo", ""),
@@ -287,7 +333,8 @@ with tab_buscar:
                     "experiencias": experiencias,
                     "cursos": cursos,
                     "habilidades": st.session_state.get("b_habilidades", ""),
-                    "habilidades_blandas": st.session_state.get("b_habilidades_blandas", "")
+                    "habilidades_blandas": st.session_state.get("b_habilidades_blandas", ""),
+                    "idiomas": idiomas_list
                 }
             
             def _cv_estructurado_a_texto(cv_est):
@@ -311,6 +358,13 @@ with tab_buscar:
                 habs_blandas = cv_est.get("habilidades_blandas", "")
                 if habs_blandas:
                     cv_build += f"HABILIDADES BLANDAS: {habs_blandas}\n"
+                
+                idiomas_cv = cv_est.get("idiomas", [])
+                if idiomas_cv:
+                    cv_build += "\nIDIOMAS:\n"
+                    for idi in idiomas_cv:
+                        cv_build += f"- {idi['idioma']}: {idi['nivel']}\n"
+                        
                 return cv_build
             
             st.divider()
@@ -328,12 +382,28 @@ with tab_buscar:
                 if st.button("🪄 Mejorar TODO con IA", type="secondary", use_container_width=True):
                     cv_base = st.session_state.cv_text_construido or st.session_state.cv_text
                     if cv_base:
-                        with st.spinner("La IA está reescribiendo tu currículum de forma impactante..."):
-                            st.session_state.cv_text_construido = mejorar_redaccion_cv(cv_base)
-                            st.session_state.cv_text = st.session_state.cv_text_construido
-                        st.success("✅ ¡Currículum mejorado con IA!")
+                        with st.spinner("Saneando formato STAR y estructurando competencias sin inventar datos..."):
+                            opt_res = optimizar_cv_base(cv_base)
+                            if opt_res and opt_res.get("resumen_ejecutivo_profesional"):
+                                lineas = [f"RESUMEN PROFESIONAL:\n{opt_res['resumen_ejecutivo_profesional']}"]
+                                if opt_res.get("experiencias_estandarizadas"):
+                                    lineas.append("\nEXPERIENCIA LABORAL:")
+                                    for exp in opt_res["experiencias_estandarizadas"]:
+                                        lineas.append(f"- {exp.get('cargo', '')} en {exp.get('empresa', '')} ({exp.get('fechas', '')}):")
+                                        for vin in exp.get("vinetas_star", []):
+                                            lineas.append(f"  * {vin}")
+                                if opt_res.get("skills_tecnicas"):
+                                    lineas.append(f"\nCOMPETENCIAS TÉCNICAS:\n{', '.join(opt_res['skills_tecnicas'])}")
+                                texto_saneado = "\n".join(lineas)
+                            else:
+                                texto_saneado = mejorar_redaccion_cv(cv_base)
+                                
+                            st.session_state.cv_text_construido = texto_saneado
+                            st.session_state.cv_text = texto_saneado
+                        st.success("✅ ¡CV Base saneado y estandarizado con fórmula STAR!")
                     else:
                         st.error("Primero debes 'Consolidar mi CV' o subir uno en la Opción A.")
+
             
             with col_b3:
                 if rut_usuario:
@@ -388,8 +458,8 @@ with tab_buscar:
                         nombre_archivo = cv_est.get("nombre", "Profesional").replace(" ", "_")
                         with st.spinner("Generando código LaTeX y compilando a PDF..."):
                             latex_code = generar_cv_latex(cv_para_latex, titulo_prof)
-                            pdf_bytes = compilar_latex_pdf(latex_code)
-                            if pdf_bytes:
+                            pdf_bytes, err_msg = compilar_latex_pdf(latex_code)
+                            if pdf_bytes is not None and err_msg is None:
                                 col_dl1, col_dl2 = st.columns(2)
                                 with col_dl1:
                                     st.download_button(
@@ -408,7 +478,7 @@ with tab_buscar:
                                         use_container_width=True
                                     )
                             else:
-                                st.error("❌ Error al compilar PDF. Se descargará el archivo .tex para revisión manual.")
+                                st.error(f"❌ {err_msg}")
                                 st.download_button(
                                     label="📥 Descargar .tex (para compilar manualmente)",
                                     data=latex_code,
@@ -427,8 +497,8 @@ with tab_buscar:
                             nombre_archivo = cv_est.get("nombre", "Profesional").replace(" ", "_")
                             with st.spinner("La IA de visión está analizando el diseño y generando PDF... esto puede tomar unos minutos."):
                                 latex_code = generar_cv_desde_imagen(imagen_ref.getvalue(), cv_para_latex)
-                                pdf_bytes = compilar_latex_pdf(latex_code)
-                                if pdf_bytes:
+                                pdf_bytes, err_msg = compilar_latex_pdf(latex_code)
+                                if pdf_bytes is not None and err_msg is None:
                                     col_dl3, col_dl4 = st.columns(2)
                                     with col_dl3:
                                         st.download_button(
@@ -447,7 +517,7 @@ with tab_buscar:
                                             use_container_width=True
                                         )
                                 else:
-                                    st.error("❌ Error al compilar PDF. Se descargará el archivo .tex para revisión manual.")
+                                    st.error(f"❌ {err_msg}")
                                     st.download_button(
                                         label="📥 Descargar .tex (para compilar manualmente)",
                                         data=latex_code,
@@ -552,13 +622,16 @@ with tab_buscar:
                     if st.button("Generar Código LaTeX Especializado"):
                         with st.spinner(f"Escribiendo código LaTeX optimizado para {cargo_latex}..."):
                             latex_code = generar_cv_latex(st.session_state.cv_text, cargo_latex)
-                            st.download_button(
-                                label="📥 Descargar archivo .tex",
-                                data=latex_code,
-                                file_name=f"CV_Optimizado_{cargo_latex.replace(' ', '_')}.tex",
-                                mime="text/plain"
-                            )
-                
+                            pdf_bytes, err_msg = compilar_latex_pdf(latex_code)
+                            if pdf_bytes:
+                                col_ld1, col_ld2 = st.columns(2)
+                                with col_ld1:
+                                    st.download_button("📥 Descargar PDF", data=pdf_bytes, file_name=f"CV_Optimizado_{cargo_latex.replace(' ', '_')}.pdf", mime="application/pdf", use_container_width=True)
+                                with col_ld2:
+                                    st.download_button("📥 Descargar .tex", data=latex_code, file_name=f"CV_Optimizado_{cargo_latex.replace(' ', '_')}.tex", mime="text/plain", use_container_width=True)
+                            else:
+                                st.error(f"❌ {err_msg}")
+                                st.download_button("📥 Descargar .tex (para revisar)", data=latex_code, file_name=f"CV_Optimizado_{cargo_latex.replace(' ', '_')}.tex", mime="text/plain")
                 st.divider()
                 st.markdown("### Fase 4: Decisión y Cacería")
                 opciones_cargos = [c.get("Cargo", c.get("cargo", "Desconocido")) for c in cargos] + ["Otro (Escribir manualmente)"]
@@ -592,6 +665,14 @@ with tab_buscar:
                             def_com = [st.session_state.comuna_casa]
                         comunas_post = st.multiselect("Comuna (Vacío = Toda la región)", opciones_com, default=def_com)
                 
+                renta_minima = st.number_input(
+                    "💰 Pretensión Salarial Mínima (Ej. CLP o USD):", 
+                    min_value=0, 
+                    value=800000, 
+                    step=50000, 
+                    help="Ofertas con sueldo publicado menor a este monto serán descalificadas automáticamente."
+                )
+
                 lugar_postulacion = "Remoto"
                 if modalidad != "Remoto":
                     if region_post == "Cualquier Región":
@@ -603,6 +684,7 @@ with tab_buscar:
                             lugar_postulacion = region_post
                     
                 btn_buscar = st.button("🚀 Comenzar Búsqueda Multicargo", type="primary", width='stretch')
+
 
                 if btn_buscar and cargos_seleccionados and lugar_postulacion:
                     cargos_a_buscar = []
@@ -642,7 +724,12 @@ with tab_buscar:
                         
                         for cargo_buscar in cargos_a_buscar:
                             def log_ui(msg, cur_cargo=cargo_buscar): placeholder_scraper.markdown(f"**Buscando: {cur_cargo}**\n\n{msg}")
-                            ofertas_parciales = loop.run_until_complete(motor_multiscraping(cargo_buscar, log_ui))
+                            
+                            query_busqueda = cargo_buscar
+                            if modalidad != "Remoto" and region_post != "Cualquier Región":
+                                query_busqueda = f"{cargo_buscar} en {region_post}"
+                                
+                            ofertas_parciales = loop.run_until_complete(motor_multiscraping(query_busqueda, log_ui))
                             
                             import unicodedata
                             def norm_text(t):
@@ -650,6 +737,9 @@ with tab_buscar:
                                 
                             ofertas_filtradas_loc = []
                             for of in ofertas_parciales:
+                                if of.get("dias_antiguedad", 0) > 15:
+                                    continue
+                                
                                 ubi_norm = norm_text(of.get("ubicacion", ""))
                                 
                                 if modalidad not in ["Remoto", "Indiferente"] and region_post != "Cualquier Región":
@@ -685,8 +775,9 @@ with tab_buscar:
                     
                     st.markdown("### Paso 5: El Embudo Matemático (El Colador)")
                     modelo = get_semantic_model()
-                    embedding_cv = modelo.encode(cv_expandido, convert_to_tensor=True)
+                    embedding_cv = generar_embedding_query(cv_expandido, modelo)
                     ofertas_filtradas = []
+
                     ofertas_descartadas = []
                     
                     progress_bar = st.progress(0)
@@ -747,7 +838,16 @@ with tab_buscar:
                         evaluacion_placeholder.markdown(f"```text\n{texto_actual}\n⏳ Evaluando oferta de {oferta['empresa']}... {i}/{candidatas} completadas\n```")
                         
                         dias_antig = oferta.get("dias_antiguedad", 0)
-                        evaluacion = evaluar_con_ollama(st.session_state.cv_text, oferta["descripcion"], direccion_casa, oferta.get("ubicacion", ""), dias_antiguedad=dias_antig)
+                        evaluacion = evaluar_con_ollama(
+                            st.session_state.cv_text, 
+                            oferta["descripcion"], 
+                            st.session_state.comuna_casa,
+                            st.session_state.region_casa,
+                            oferta.get("ubicacion", ""), 
+                            dias_antiguedad=dias_antig,
+                            renta_pretendida_minima=renta_minima
+                        )
+
                         oferta.update(evaluacion)
                         
                         st.session_state.ofertas_evaluadas.append(oferta)
@@ -799,6 +899,38 @@ with tab_buscar:
                                     st.toast(f"Oferta guardada exitosamente para el RUT {rut_usuario}.")
                                     
                             st.divider()
+                            st.markdown("#### 🎯 Kit de Postulación & Prep de Entrevista")
+                            if f"kit_{idx}" not in st.session_state:
+                                st.session_state[f"kit_{idx}"] = None
+
+                            if st.button("🚀 Generar Kit Sniper (InMail + Defensa de Entrevista)", key=f"btn_kit_{idx}"):
+                                with st.spinner("Generando mensaje InMail y estrategia de entrevista..."):
+                                    kit_res = generar_kit_postulacion(
+                                        cv_text=st.session_state.cv_text,
+                                        job_desc=oferta.get("descripcion", ""),
+                                        brechas_detectadas=oferta.get("faltantes", []),
+                                        empresa=oferta.get("empresa", "la empresa"),
+                                        cargo=oferta.get("titulo", "el cargo")
+                                    )
+                                    st.session_state[f"kit_{idx}"] = kit_res
+                                    st.rerun()
+
+                            if st.session_state[f"kit_{idx}"]:
+                                kit_data = st.session_state[f"kit_{idx}"]
+                                tab_inmail, tab_preguntas = st.tabs(["📧 InMail / Mensaje LinkedIn Sniper", "🛡️ Defensa de Brechas en Entrevista"])
+                                
+                                with tab_inmail:
+                                    st.markdown("**Mensaje listo para copiar y enviar al reclutador/CTO:**")
+                                    st.code(kit_data.get("inmail_sniper_mensaje", ""), language="text")
+                                    
+                                with tab_preguntas:
+                                    st.markdown("**Preguntas trampa esperadas y tu estrategia de respuesta:**")
+                                    preguntas = kit_data.get("entrevista_defensa_brechas", [])
+                                    for p_idx, p in enumerate(preguntas):
+                                        with st.expander(f"❓ Pregunta {p_idx + 1}: {p.get('pregunta_trampa_reclutador', '')}"):
+                                            st.info(f"💡 **Estrategia de Respuesta:**\n\n{p.get('estrategia_defensa_candidato', '')}")
+
+                            st.divider()
                             st.markdown("#### 🪄 Generar CV para esta oferta")
                             if f"draft_{idx}" not in st.session_state:
                                 st.session_state[f"draft_{idx}"] = ""
@@ -806,7 +938,8 @@ with tab_buscar:
                             col_gen1, col_gen2 = st.columns(2)
                             with col_gen1:
                                 if st.button("🤖 Generar Borrador LaTeX (IA)", key=f"btn_gen_{idx}"):
-                                    with st.spinner("Creando currículum optimizado..."):
+                                    with st.spinner("Aplicando ATS Keyword Mirroring para esta oferta..."):
+                                        tailored = adaptar_cv_a_oferta(st.session_state.cv_text, oferta.get("descripcion", ""))
                                         from core.llm_evaluator import generar_cv_latex_para_oferta
                                         latex_res = generar_cv_latex_para_oferta(st.session_state.cv_text, oferta.get("descripcion", ""), oferta.get("titulo", ""))
                                         st.session_state[f"draft_{idx}"] = latex_res
@@ -830,12 +963,18 @@ with tab_buscar:
                                 with col_pdf2:
                                     if st.button("📄 Exportar a PDF (Requiere MiKTeX)", key=f"btn_pdf_{idx}", type="primary"):
                                         with st.spinner("Compilando PDF localmente..."):
-                                            from core.llm_evaluator import compilar_latex_pdf
-                                            pdf_bytes = compilar_latex_pdf(st.session_state[f"draft_{idx}"])
-                                            if pdf_bytes:
-                                                st.download_button("✅ Descargar PDF", pdf_bytes, file_name=f"CV_{oferta.get('empresa', 'Oferta')}.pdf", mime="application/pdf", key=f"dl_pdf_{idx}")
+                                            pdf_bytes, err_msg = compilar_latex_pdf(st.session_state[f"draft_{idx}"])
+                                            if pdf_bytes is not None and err_msg is None:
+                                                st.download_button(
+                                                    label="✅ Descargar PDF",
+                                                    data=pdf_bytes,
+                                                    file_name=f"CV_{oferta.get('empresa', 'Oferta')}.pdf",
+                                                    mime="application/pdf",
+                                                    key=f"dl_pdf_{idx}"
+                                                )
                                             else:
-                                                st.error("Error al compilar. Revisa que el código LaTeX sea válido y que pdflatex esté instalado (MiKTeX).")
+                                                st.error(f"❌ No se pudo generar el PDF. Detalle MiKTeX/LaTeX:\n\n{err_msg or 'Error desconocido'}")
+
     else:
         st.info("👈 Por favor, ingresa tu RUT para comenzar.")
 

@@ -5,51 +5,13 @@ import os
 import tempfile
 import subprocess
 import time
+from typing import List, Optional
+from pydantic import BaseModel, Field
 from config.settings import OLLAMA_URL, MODEL_OLLAMA
 
-def compilar_latex_pdf(latex_code):
-    """Compila código LaTeX a PDF usando pdflatex del sistema (MiKTeX).
-    Ejecuta pdflatex dos veces para resolver referencias cruzadas.
-    Retorna los bytes del PDF o None si falla."""
-    try:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            tex_path = os.path.join(tmpdir, "cv.tex")
-            pdf_path = os.path.join(tmpdir, "cv.pdf")
-            
-            with open(tex_path, "w", encoding="utf-8") as f:
-                f.write(latex_code)
-            
-            # Ejecutar pdflatex dos veces (para resolver referencias)
-            for i in range(2):
-                result = subprocess.run(
-                    ["pdflatex", "-interaction=nonstopmode", "-output-directory", tmpdir, tex_path],
-                    capture_output=True, text=True, timeout=60, cwd=tmpdir
-                )
-            
-            if os.path.exists(pdf_path):
-                with open(pdf_path, "rb") as f:
-                    return f.read()
-            else:
-                # Mostrar las últimas líneas del log para debug
-                log_path = os.path.join(tmpdir, "cv.log")
-                if os.path.exists(log_path):
-                    with open(log_path, "r", encoding="utf-8", errors="ignore") as f:
-                        log_content = f.read()
-                    # Extraer solo las líneas de error
-                    errores = [l for l in log_content.split("\n") if l.startswith("!") or "Error" in l]
-                    if errores:
-                        print(f"Errores LaTeX: {'; '.join(errores[:5])}")
-                print(f"pdflatex stderr: {result.stderr[-500:] if result.stderr else 'N/A'}")
-                return None
-    except subprocess.TimeoutExpired:
-        print("Error: pdflatex tardó más de 60 segundos.")
-        return None
-    except FileNotFoundError:
-        print("Error: pdflatex no está instalado. Instala MiKTeX desde https://miktex.org/")
-        return None
-    except Exception as e:
-        print(f"Error compilando PDF: {e}")
-        return None
+
+from core.pdf_compiler import compilar_latex_pdf, sanitizar_latex, compilar_cv_pdf
+
 
 MODEL_VISION = "llava"
 
@@ -130,50 +92,156 @@ def mejorar_campo_con_ia(texto_campo, tipo_campo):
     resultado = _call_ollama(prompt, fallback)
     return resultado.get("texto_mejorado", texto_campo)
 
-def evaluar_con_ollama(cv_text, job_desc, direccion_usuario, ubicacion_oferta, dias_antiguedad=0):
+class EvaluacionOfertaSchema(BaseModel):
+    """
+    Modelo de datos Pydantic v2 para validar la respuesta estructurada de evaluación de ofertas de Ollama.
+    Garantiza tipos estrictos y cumplimiento de formato sin texto markdown extra.
+    """
+    razonamiento_cot: str = Field(
+        ...,
+        description="Justificación detallada paso a paso (Chain of Thought) considerando experiencia, requisitos, pretensión de renta, antigüedad y ubicación del candidato."
+    )
+    score: float = Field(
+        ...,
+        ge=1.0,
+        le=10.0,
+        description="Calificación final de compatibilidad entre 1.0 y 10.0."
+    )
+    pros: List[str] = Field(
+        ...,
+        description="Lista de fortalezas y coincidencias de habilidades clave entre el CV y la oferta."
+    )
+    brechas_tecnicas: List[str] = Field(
+        ...,
+        description="Lista de habilidades faltantes, experiencia insuficiente o advertencias de antigüedad."
+    )
+    proximidad_geografica_valida: bool = Field(
+        ...,
+        description="Indica si la ubicación de la oferta es cercana o compatible geográficamente con el candidato."
+    )
+    renta_detectada_oferta: str = Field(
+        ...,
+        description="Sueldo o rango salarial explícito en la oferta (ej. '$2.000.000 - $2.500.000 CLP', 'USD 3,000') o 'No especificada / A convenir'."
+    )
+    cumple_pretension_salarial: bool = Field(
+        ...,
+        description="True si la renta publicada es igual o superior a la pretensión, O si no está informada pero la responsabilidad/seniority es coherente. False únicamente si el sueldo explícito está por debajo de la pretensión."
+    )
+
+def evaluar_con_ollama(
+    cv_text: str,
+    job_desc: str,
+    comuna_usuario: Optional[str] = None,
+    region_usuario: Optional[str] = None,
+    ubicacion_oferta: Optional[str] = None,
+    dias_antiguedad: int = 0,
+    renta_pretendida_minima: Optional[int] = None
+) -> dict:
+    """
+    Evalúa la compatibilidad entre el CV del candidato y una oferta laboral utilizando
+    Structured Outputs (JSON Schema nativo) con Ollama, Pydantic v2 y filtro de pretensión salarial.
+
+    Args:
+        cv_text: Texto del CV consolidado/expandido.
+        job_desc: Texto descriptivo de la oferta laboral.
+        comuna_usuario: Comuna de residencia del candidato.
+        region_usuario: Región de residencia del candidato.
+        ubicacion_oferta: Ubicación informada en la oferta.
+        dias_antiguedad: Antigüedad de la oferta en días.
+        renta_pretendida_minima: Pretensión salarial mínima esperada (monto numérico).
+
+    Returns:
+        dict: Diccionario estructurado con campos validados (puntaje, pros, faltantes, razonamiento_cot, cerca_de_casa, renta_oferta, cumple_renta).
+    """
+    # 1. Comprobar cercanía geográfica mediante lógica determinista
+    cerca = False
+    if comuna_usuario and comuna_usuario != "No especificar" and ubicacion_oferta:
+        import unicodedata
+        def norm(t): return unicodedata.normalize('NFKD', str(t).lower()).encode('ASCII', 'ignore').decode('utf-8')
+        cerca = norm(comuna_usuario) in norm(ubicacion_oferta)
+
+    # 2. Generar el esquema JSON estricto desde Pydantic v2
+    json_schema = EvaluacionOfertaSchema.model_json_schema()
+
+    renta_fmt = f"${renta_pretendida_minima:,}" if renta_pretendida_minima else "No especificada"
+
     prompt = f"""
-    Eres un reclutador experto. Compara el CV con la oferta.
-    
+    Eres un reclutador técnico senior y auditor de talento. Realiza una evaluación objetiva y crítica comparando el CV del candidato contra la oferta laboral.
+
+    INFORMACIÓN DE UBICACIÓN, RENTA Y CONTEXTO:
+    - Comuna / Región Candidato: {comuna_usuario or 'No especificada'}, {region_usuario or 'No especificada'}
+    - Ubicación Oferta: {ubicacion_oferta or 'No especificada'}
+    - Proximidad Geográfica Calculada: {cerca}
+    - Antigüedad de la oferta: {dias_antiguedad} días
+    - Pretensión Salarial Mínima Candidato: {renta_fmt}
+
     CV DEL CANDIDATO:
     {cv_text}
-    
+
     DESCRIPCIÓN DE LA OFERTA:
     {job_desc}
-    
-    ANTIGÜEDAD DE LA OFERTA:
-    La oferta fue publicada hace {dias_antiguedad} días.
-    Si la oferta tiene más de 30 días, es muy probable que esté inactiva. En ese caso, debes penalizar severamente el "puntaje" y mencionarlo explícitamente en "faltantes" o "consejo".
-    
-    Devuelve estrictamente un JSON (sin markdown adicional):
-    {{
-        "puntaje": 8,
-        "pros": ["Puntos fuertes"],
-        "faltantes": ["Habilidades que faltan o advertencia de antigüedad"],
-        "consejo": "Consejo"
-    }}
+
+    REGLAS DE EVALUACIÓN OBLIGATORIAS:
+    1. CHAIN OF THOUGHT (razonamiento_cot): En el campo razonamiento_cot, detalla explícitamente:
+       a) Comparación entre años de experiencia/seniority requeridos vs. los del candidato.
+       b) Análisis de tecnologías esenciales vs. faltantes.
+       c) Justificación de la evaluación salarial: evalúa si el sueldo publicado cumple la pretensión del candidato ({renta_fmt}), o si la oferta no publica sueldo ('No especificada / A convenir'), estima si el nivel/seniority del cargo es coherente con dicha aspiración.
+       d) Penalizaciones por antigüedad de la oferta (si tiene más de 30 días).
+    2. RENTA Y EVALUACIÓN SALARIAL:
+       - Completa renta_detectada_oferta con la cifra explícita o 'No especificada / A convenir'.
+       - Asigna cumple_pretension_salarial = True si el sueldo explícito >= pretensión mínima ({renta_fmt}), O si la renta no está publicada pero la jerarquía del cargo es equivalente a esa aspiración.
+       - Asigna cumple_pretension_salarial = False ÚNICAMENTE si la oferta publica explícitamente un sueldo menor a {renta_fmt}.
+       - Si cumple_pretension_salarial es False, PENALIZA DRÁSTICAMENTE el campo score asignando una nota MÁXIMA de 4.0.
+    3. SENIORITY & GAPS: Si la oferta exige un nivel mayor al del candidato (ej. piden Senior y es Junior), penaliza el puntaje (score <= 4.0) y explica las brechas en brechas_tecnicas.
+    4. SCORE: Calificación final entre 1.0 y 10.0 basada estrictamente en la evidencia.
+    5. PROXIMIDAD: Asigna proximidad_geografica_valida el valor booleano {cerca}.
     """
-    
-    import random
-    fallback = {
-        "puntaje": random.choice([7, 8, 9, 10]),
-        "pros": ["Perfil coincide parcialmente."],
-        "faltantes": ["Podría faltar experiencia específica."],
-        "consejo": "Destaca tus proyectos principales en el CV."
+
+    payload = {
+        "model": MODEL_OLLAMA,
+        "prompt": prompt,
+        "format": json_schema,
+        "stream": False,
+        "options": {
+            "temperature": 0.2
+        }
     }
-    
-    evaluacion = _call_ollama(prompt, fallback)
-    
-    # Comprobar cercanía geográfica
-    cerca = False
-    if direccion_usuario and ubicacion_oferta:
-        # Una comprobación simple (se podría mejorar con NLP o APIs de mapas)
-        dir_lower = direccion_usuario.lower()
-        ubi_lower = ubicacion_oferta.lower()
-        if dir_lower in ubi_lower or ubi_lower in dir_lower or "remoto" in ubi_lower:
-            cerca = True
-            
-    evaluacion["cerca_de_casa"] = cerca
-    return evaluacion
+
+    fallback_data = {
+        "razonamiento_cot": "Simulación o fallo de conexión con el servidor Ollama.",
+        "score": 7.0,
+        "pros": ["Perfil coincide parcialmente con la oferta."],
+        "brechas_tecnicas": ["Verificar experiencia previa específica."],
+        "proximidad_geografica_valida": cerca,
+        "renta_detectada_oferta": "No especificada / A convenir",
+        "cumple_pretension_salarial": True,
+        "is_simulated": True,
+        "model_used": "Simulación (Fallback)"
+    }
+
+    try:
+        response = requests.post(OLLAMA_URL, json=payload, timeout=300)
+        response.raise_for_status()
+        data = response.json()
+
+        # Validar la respuesta JSON con Pydantic v2
+        eval_obj = EvaluacionOfertaSchema.model_validate_json(data["response"])
+        res_dict = eval_obj.model_dump()
+        res_dict["is_simulated"] = False
+        res_dict["model_used"] = MODEL_OLLAMA
+    except Exception as e:
+        res_dict = fallback_data
+
+    # Compatibilidad retroactiva con la interfaz gráfica (Streamlit) y la Base de Datos
+    res_dict["puntaje"] = res_dict.get("score", 7.0)
+    res_dict["faltantes"] = res_dict.get("brechas_tecnicas", [])
+    res_dict["cerca_de_casa"] = res_dict.get("proximidad_geografica_valida", cerca)
+    res_dict["consejo"] = res_dict.get("razonamiento_cot", "")
+    res_dict["renta_oferta"] = res_dict.get("renta_detectada_oferta", "No especificada / A convenir")
+    res_dict["cumple_renta"] = res_dict.get("cumple_pretension_salarial", True)
+
+    return res_dict
+
 
 def analizar_perfil(cv_text, cargos_descartados=None):
     if cargos_descartados is None: cargos_descartados = []
@@ -329,6 +397,7 @@ def parsear_cv_a_json(cv_text):
     - Para los cursos, incluye el campo "fechas" con el período de estudio (Ej: "2020 - 2024"). Si no se menciona, devuelve una cadena vacía.
     - Para las habilidades técnicas, únelas en una sola cadena separada por comas (ej: "Python, Excel, SQL"). NO devuelvas una lista/array.
     - Para las habilidades blandas, únelas en una sola cadena separada por comas (ej: "Liderazgo, Trabajo en equipo, Comunicación efectiva"). NO devuelvas una lista/array. Si no se mencionan explícitamente, infiere las más probables del contexto del CV.
+    - Para los idiomas, extrae el nombre del idioma y su nivel de dominio. Si no se menciona el nivel explícito (ej: Básico, Intermedio, Avanzado, Nativo), infiere uno basado en el contexto o usa "Básico" por defecto.
     
     TEXTO BRUTO DEL CV:
     {cv_text}
@@ -345,7 +414,10 @@ def parsear_cv_a_json(cv_text):
             {{"nombre": "...", "institucion": "...", "fechas": "..."}}
         ],
         "habilidades": "...",
-        "habilidades_blandas": "..."
+        "habilidades_blandas": "...",
+        "idiomas": [
+            {{"idioma": "...", "nivel": "..."}}
+        ]
     }}
     """
     
@@ -356,7 +428,8 @@ def parsear_cv_a_json(cv_text):
         "experiencias": [],
         "cursos": [],
         "habilidades": "",
-        "habilidades_blandas": ""
+        "habilidades_blandas": "",
+        "idiomas": []
     }
     
     try:

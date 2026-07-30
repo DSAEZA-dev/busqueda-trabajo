@@ -5,7 +5,25 @@ from config.glossary import GLOSARIO_TECNICO as GLOSARIO_FALLBACK
 
 @st.cache_resource
 def get_semantic_model():
-    return SentenceTransformer(MODEL_EMBEDDING)
+    """
+    Carga el modelo multilingüe E5 en CPU para asegurar que la VRAM (6 GB de la RTX 2060)
+    se mantenga 100% reservada para la inferencia de Ollama (Llama 3.1 / Llava).
+    """
+    return SentenceTransformer(MODEL_EMBEDDING, device="cpu")
+
+def generar_embedding_query(texto: str, model: SentenceTransformer):
+    """
+    Genera el embedding para una consulta o CV agregando el prefijo asimétrico obligatorio 'query: '.
+    """
+    texto_preparado = f"query: {texto}"
+    return model.encode(texto_preparado, convert_to_tensor=True, device="cpu")
+
+def generar_embedding_passage(texto: str, model: SentenceTransformer):
+    """
+    Genera el embedding para un pasaje o descripción de oferta agregando el prefijo asimétrico obligatorio 'passage: '.
+    """
+    texto_preparado = f"passage: {texto}"
+    return model.encode(texto_preparado, convert_to_tensor=True, device="cpu")
 
 def extraer_habilidades_base(cv_text, glosario_dinamico=None):
     if glosario_dinamico is None:
@@ -55,7 +73,16 @@ def expandir_cv_dinamico(cv_text, terminos_encontrados, glosario_dinamico=None):
         
     return cv_expandido, expansiones_dict, total_terminos
 
-def calcular_similitud(embedding_cv, desc_oferta, model):
-    embedding_oferta = model.encode(desc_oferta, convert_to_tensor=True)
+def calcular_similitud(embedding_cv, desc_oferta, model: SentenceTransformer):
+    """
+    Calcula la similitud cosenoidal entre el embedding del CV (query) y la oferta (passage).
+    Aplica automáticamente el prefijo 'passage: ' a la descripción de la oferta y computa en CPU.
+    """
+    if isinstance(desc_oferta, str):
+        embedding_oferta = generar_embedding_passage(desc_oferta, model)
+    else:
+        embedding_oferta = desc_oferta
+
     similitud = util.pytorch_cos_sim(embedding_cv, embedding_oferta).item()
     return similitud
+
